@@ -380,8 +380,7 @@ class MeshtasticTUI(App):
         text-align: center;
         height: 1;
         padding: 1;
-    }
-      #detail_content_left {
+    }    #detail_content_left {
         width: 50%;
         height: 1fr;
         padding: 1;
@@ -392,6 +391,15 @@ class MeshtasticTUI(App):
         height: 1fr;
         padding: 1;
         border-left: solid $primary;
+    }
+      #detail_content_left Label {
+        text-wrap: wrap;
+        width: 100%;
+    }
+    
+    #detail_content_right Label {
+        text-wrap: wrap;
+        width: 100%;
     }
     
     #close_button {
