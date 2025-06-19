@@ -11,9 +11,10 @@ from datetime import datetime
 import threading
 import asyncio
 from textual.app import App, ComposeResult
-from textual.containers import Container, Horizontal, Vertical
-from textual.widgets import DataTable, Input, Static, Button, Log, Footer
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.widgets import DataTable, Input, Static, Button, Log, Footer, Label
 from textual.binding import Binding
+from textual.screen import ModalScreen
 
 import logging
 
@@ -364,6 +365,39 @@ class MeshtasticTUI(App):
         scrollbar-size-vertical: 1;
         scrollbar-size-horizontal: 1;
     }
+    
+    #detail_modal {
+        align: center middle;
+        width: 80%;
+        height: 80%;
+        background: $surface;
+        border: thick $primary;
+    }
+    
+    #detail_header {
+        background: $primary;
+        color: $text;
+        text-align: center;
+        height: 1;
+        padding: 1;
+    }
+      #detail_content_left {
+        width: 50%;
+        height: 1fr;
+        padding: 1;
+    }
+    
+    #detail_content_right {
+        width: 50%;
+        height: 1fr;
+        padding: 1;
+        border-left: solid $primary;
+    }
+    
+    #close_button {
+        margin: 1;
+        width: 20;
+    }
     """
     BINDINGS = [
         Binding("ctrl+c", "quit", "Quit"),        Binding("ctrl+r", "refresh", "Refresh"),
@@ -433,6 +467,39 @@ class MeshtasticTUI(App):
         if event.input.id == "filter_input":
             self.filter_text = event.value.lower()
             self.update_table()
+    
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Called when a row is selected in the packet table."""
+        table = event.data_table
+        if table.id == "packet_table":
+            # Get the selected row index
+            row_index = event.cursor_row
+            
+            with packet_list_lock:
+                packets = packet_list.copy()
+            
+            # Apply current filters to get the same filtered list as displayed
+            if self.session_filter_active:
+                packets = [p for p in packets if p.get('rxTime', 0) >= self.session_start_time]
+            
+            if self.filter_text:
+                filtered_packets = []
+                for packet in packets:
+                    search_text = f"{packet.get('fromId', '')} {packet.get('toId', '')} {packet.get('portnum', '')} {packet.get('payload', '')} {packet.get('priority', '')} {packet.get('notes', '')}".lower()
+                    if packet.get('telemetry'):
+                        search_text += f" {str(packet['telemetry'])}".lower()
+                    if packet.get('position'):
+                        search_text += f" {str(packet['position'])}".lower()
+                    if self.filter_text in search_text:
+                        filtered_packets.append(packet)
+                packets = filtered_packets
+            
+            # Get the packet data for the selected row (accounting for reverse order display)
+            display_packets = list(reversed(packets[-100:]))
+            if 0 <= row_index < len(display_packets):
+                selected_packet = display_packets[row_index]
+                # Show the detail modal
+                self.push_screen(PacketDetailModal(selected_packet))
     
     def update_table(self) -> None:
         """Update the packet table with filtered data."""
@@ -574,6 +641,115 @@ class MeshtasticTUI(App):
         """Quit the application."""
         self.exit()
 
+class PacketDetailModal(ModalScreen):
+    """A modal screen to show detailed packet information."""
+    
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close"),
+        Binding("q", "dismiss", "Close"),
+    ]
+    
+    def __init__(self, packet_data):
+        super().__init__()
+        self.packet_data = packet_data
+    
+    def compose(self) -> ComposeResult:
+        """Create the modal content."""
+        with Container(id="detail_modal"):
+            yield Static("Packet Details", id="detail_header")
+            with Horizontal():
+                # Left column - Basic packet info and parsed data
+                with VerticalScroll(id="detail_content_left"):
+                    yield Label("=== Basic Packet Info ===")
+                    yield Label(f"Packet ID: {self.packet_data.get('id', 'N/A')}")
+                    yield Label(f"From: {self.packet_data.get('fromId', 'N/A')}")
+                    yield Label(f"To: {self.packet_data.get('toId', 'N/A')}")
+                    yield Label(f"Port: {self.packet_data.get('portnum', 'N/A')}")
+                    yield Label(f"Time: {datetime.fromtimestamp(self.packet_data.get('rxTime', 0)).strftime('%Y-%m-%d %H:%M:%S') if self.packet_data.get('rxTime') else 'N/A'}")
+                    yield Label(f"Hop Limit: {self.packet_data.get('hopLimit', 'N/A')}")
+                    yield Label(f"Priority: {self.packet_data.get('priority', 'N/A')}")
+                    
+                    # Payload
+                    yield Label("")
+                    yield Label("=== Payload ===")
+                    payload = self.packet_data.get('payload', b'')
+                    if isinstance(payload, bytes):
+                        try:
+                            payload_str = payload.decode('utf-8')
+                            yield Label(f"Text: {payload_str}")
+                        except:
+                            yield Label(f"Binary: {payload.hex()[:100]}{'...' if len(payload) > 50 else ''}")
+                    else:
+                        yield Label(f"Value: {str(payload)}")
+                    
+                    # Telemetry
+                    yield Label("")
+                    yield Label("=== Telemetry ===")
+                    telemetry = self.packet_data.get('telemetry')
+                    if telemetry:
+                        for key, value in telemetry.items():
+                            yield Label(f"  {key}: {value}")
+                    else:
+                        yield Label("None")
+                    
+                    # Position
+                    yield Label("")
+                    yield Label("=== Position ===")
+                    position = self.packet_data.get('position')
+                    if position:
+                        for key, value in position.items():
+                            if key in ['latitude_i', 'longitude_i'] and abs(value) > 1000000:
+                                # Convert scaled integers
+                                yield Label(f"  {key}: {value} ({value/1e7:.6f})")
+                            else:
+                                yield Label(f"  {key}: {value}")
+                    else:
+                        yield Label("None")
+                    
+                    # Notes
+                    yield Label("")
+                    yield Label("=== Notes ===")
+                    notes = self.packet_data.get('notes', '')
+                    yield Label(f"{notes if notes else 'None'}")
+                
+                # Right column - Original data
+                with VerticalScroll(id="detail_content_right"):
+                    # Packet Original
+                    yield Label("=== Packet Original ===")
+                    packet_original = self.packet_data.get('packet_original')
+                    if packet_original:
+                        if isinstance(packet_original, dict):
+                            for key, value in packet_original.items():
+                                yield Label(f"  {key}: {value}")
+                        else:
+                            yield Label(f"{str(packet_original)}")
+                    else:
+                        yield Label("None")
+                    
+                    # Payload Original
+                    yield Label("")
+                    yield Label("=== Payload Original ===")
+                    payload_original = self.packet_data.get('payload_original')
+                    if payload_original:
+                        if isinstance(payload_original, dict):
+                            for key, value in payload_original.items():
+                                yield Label(f"  {key}: {value}")
+                        else:
+                            yield Label(f"{str(payload_original)}")
+                    else:
+                        yield Label("None")
+                        
+            yield Button("Close", id="close_button", variant="primary")
+    
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle button presses."""
+        if event.button.id == "close_button":
+            self.dismiss()
+    
+    def action_dismiss(self) -> None:
+        """Close the modal."""
+        self.dismiss()
+
 def remove_key_recursive(d, removeKey):
     """
     Recursively remove all occurrences of removeKey from dictionaries (including nested).
@@ -596,6 +772,8 @@ class Decoded:
     position: Optional[dict]
     bitfield: Optional[int]
     notes: Optional[str] = None
+    data_original: Optional[Any] = None  # Store original data for debugging
+
 
     @classmethod
     def from_dict(cls, data):
@@ -606,7 +784,8 @@ class Decoded:
             payload=data.pop("payload", ""),
             telemetry=data.pop("telemetry", None),
             position=data.pop("position", None),
-            bitfield=data.pop("bitfield", None)
+            bitfield=data.pop("bitfield", None),
+            data_original=data,  # Store original data for debugging
         )
         if data.keys():
             # log.warning(f"Decoded.from_dict: Unrecognized keys {data.keys()} in data: {data}")
@@ -626,6 +805,7 @@ class Packet:
     raw: str
     fromId: str
     toId: str
+    data_original: Optional[Any] = None  # Store original data for debugging
 
     @classmethod
     def from_dict(cls, data):
@@ -633,14 +813,15 @@ class Packet:
         return cls(
             from_=data.get("from", 0),
             to=data.get("to", 0),
-            decoded=Decoded.from_dict(data.get("decoded", {})),
+            decoded=Decoded.from_dict(data.pop("decoded", {})), # pop not get, because we don't want to show in data_original
             id=data.get("id", 0),
             rxTime=data.get("rxTime", 0),
             hopLimit=data.get("hopLimit", 0),
             priority=data.get("priority", "normal"),
             raw=raw.SerializeToString() if raw else None,
             fromId=data.get("fromId", ""),
-            toId=data.get("toId", "")
+            toId=data.get("toId", ""),
+            data_original=data  # Store original data for debugging
         )
 
 def onReceive(packet, interface): # called when a packet arrives
@@ -686,8 +867,7 @@ def onReceive(packet, interface): # called when a packet arrives
             }
             if unknown_pos_keys:
                 processing_notes.append(f"Unknown position: {','.join(list(unknown_pos_keys)[:2])}")
-        
-        # Add to global packet list for TUI
+          # Add to global packet list for TUI
         with packet_list_lock:
             packet_info = {
                 'id': parsed_packet.id,
@@ -700,7 +880,9 @@ def onReceive(packet, interface): # called when a packet arrives
                 'priority': parsed_packet.priority,
                 'telemetry': parsed_packet.decoded.telemetry,
                 'position': parsed_packet.decoded.position,
-                'notes': "; ".join(processing_notes) if processing_notes else ""
+                'notes': "; ".join(processing_notes) if processing_notes else "",
+                'payload_original': parsed_packet.decoded.data_original,
+                'packet_original': parsed_packet.data_original
             }
             packet_list.append(packet_info)
             
@@ -761,8 +943,30 @@ def run_meshtastic_interface():
         print(f"Error in meshtastic interface: {e}")
 
 def add_test_packets():
-    """Add some test packets for demonstration."""
+    """Add some test packets and node info for demonstration."""
     import random
+    
+    # Add some test node information first
+    test_nodes = [
+        {"node_id": "Node_00", "long_name": "Base Station Alpha", "short_name": "BSA"},
+        {"node_id": "Node_01", "long_name": "Mobile Unit Beta", "short_name": "MUB"},
+        {"node_id": "Node_02", "long_name": "Sensor Gamma", "short_name": "SG"},
+        {"node_id": "Node_03", "long_name": "Repeater Delta", "short_name": "RD"},
+        {"node_id": "Node_04", "long_name": "Weather Station", "short_name": "WS"},
+        {"node_id": "Device_A", "long_name": "Emergency Beacon", "short_name": "EB"},
+        {"node_id": "Device_B", "long_name": "Mobile Tracker", "short_name": "MT"},
+    ]
+    
+    # Store test node information
+    for node in test_nodes:
+        store_node_info(node["node_id"], {
+            'longName': node["long_name"],
+            'shortName': node["short_name"],
+            'hwModel': 'HELTEC_V3',
+            'firmwareVersion': '2.3.2',
+            'role': 'CLIENT'
+        })
+    
     test_packets = []
     
     # Create varied test packets with different data types
