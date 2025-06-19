@@ -603,25 +603,6 @@ class MeshtasticTUI(App):
             
             # Generate notes based on packet processing
             notes = packet.get('notes', '')
-            # if not notes:
-            #     notes_list = []
-                # if not packet.get('fromId') or packet.get('fromId') == 'N/A':
-                #     notes_list.append("No fromId")
-                # if isinstance(payload, bytes) and len(payload) > 0:
-                #     try:
-                #         payload.decode('utf-8')
-                #     except:
-                #         notes_list.append("Binary payload")
-                # if telemetry and isinstance(telemetry, dict):
-                #     unknown_keys = set(telemetry.keys()) - {'battery_level', 'voltage', 'temperature', 'channel_utilization', 'air_util_tx'}
-                #     if unknown_keys:
-                #         notes_list.append(f"Unknown tel keys: {','.join(list(unknown_keys)[:2])}")
-                # if position and isinstance(position, dict):
-                #     unknown_keys = set(position.keys()) - {'latitude_i', 'longitude_i', 'latitude', 'longitude', 'altitude', 'time'}
-                #     if unknown_keys:
-                #         notes_list.append(f"Unknown pos keys: {','.join(list(unknown_keys)[:2])}")
-                
-                # notes = "; ".join(notes_list)[:40] if notes_list else "-"
             
             table.add_row(time_str, from_display, to_display, portnum, payload_str, hop_limit, priority, telemetry_str, position_str, notes)
         
@@ -770,6 +751,7 @@ class Decoded:
     payload: bytes
     telemetry: Optional[dict]
     position: Optional[dict]
+    user: Optional[dict]
     bitfield: Optional[int]
     notes: Optional[str] = None
     data_original: Optional[Any] = None  # Store original data for debugging
@@ -784,6 +766,7 @@ class Decoded:
             payload=data.pop("payload", ""),
             telemetry=data.pop("telemetry", None),
             position=data.pop("position", None),
+            user=data.pop("user", None),
             bitfield=data.pop("bitfield", None),
             data_original=data,  # Store original data for debugging
         )
@@ -809,11 +792,12 @@ class Packet:
 
     @classmethod
     def from_dict(cls, data):
-        raw = data.get("raw", None)
+        raw = data.pop("raw", None)
+        decoded = Decoded.from_dict(data.pop("decoded", {}))
         return cls(
             from_=data.get("from", 0),
             to=data.get("to", 0),
-            decoded=Decoded.from_dict(data.pop("decoded", {})), # pop not get, because we don't want to show in data_original
+            decoded=decoded, # pop not get, because we don't want to show in data_original
             id=data.get("id", 0),
             rxTime=data.get("rxTime", 0),
             hopLimit=data.get("hopLimit", 0),
@@ -828,6 +812,12 @@ def onReceive(packet, interface): # called when a packet arrives
     try:
         # Parse the packet first
         parsed_packet = Packet.from_dict(packet)
+
+        if parsed_packet.fromId is None and parsed_packet.decoded.portnum == "NODEINFO_APP":
+            # If fromId is None, use the node ID from the decoded data
+            fromId = parsed_packet.decoded.user.get('id', None)
+            if fromId:
+                parsed_packet.fromId = fromId
         
         # Update node information if available
         if hasattr(interface, 'nodes') and parsed_packet.fromId in interface.nodes:
