@@ -12,7 +12,7 @@ import threading
 import asyncio
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
-from textual.widgets import DataTable, Input, Static, Button, Log, Footer, Label
+from textual.widgets import DataTable, Input, Static, Button, Log, Footer, Label, TabbedContent, TabPane, TextArea
 from textual.binding import Binding
 from textual.screen import ModalScreen
 
@@ -401,12 +401,26 @@ class MeshtasticTUI(App):
         text-wrap: wrap;
         width: 100%;
     }
-    
-    #close_button {
+      #close_button {
         margin: 1;
         width: 20;
     }
+    
+    #topic_input {
+        margin: 1;
+        height: 3;
+    }
+    
+    #topic_log {
+        margin: 1;
+        height: 1fr;
+    }
+    
+    #topic_controls {
+        margin: 1;
+        height: 3;    }
     """
+    
     BINDINGS = [
         Binding("ctrl+c", "quit", "Quit"),        Binding("ctrl+r", "refresh", "Refresh"),
         Binding("ctrl+f", "focus_filter", "Focus Filter"),
@@ -420,18 +434,32 @@ class MeshtasticTUI(App):
         self.session_filter_active = False
         self.show_long_names = True  # Toggle between long names and hex IDs
         self.update_timer = None
+        self.current_topic = None  # Track current subscription topic
+        self.topic_callback = None  # Store callback reference
     
     def compose(self) -> ComposeResult:
         """Create child widgets for the app."""
         yield Static("Meshtastic Packet Monitor", classes="header", id="header")
-        yield Input(placeholder="Filter packets (node ID, portnum, etc.)", id="filter_input")
-        with Horizontal(id="controls"):
-            yield Button("All Messages", id="all_button", variant="primary")
-            yield Button("Session Only", id="session_button")
-            yield Button("Long Names", id="name_toggle_button", variant="primary")
-            yield Static(f"Session started: {datetime.fromtimestamp(self.session_start_time).strftime('%H:%M:%S')}", id="session_info")
-        yield DataTable(id="packet_table")
-        yield Static("Total packets: 0 | Filtered: 0", id="stats")
+        
+        with TabbedContent():
+            with TabPane("Packets", id="packets_tab"):
+                yield Input(placeholder="Filter packets (node ID, portnum, etc.)", id="filter_input")
+                with Horizontal(id="controls"):
+                    yield Button("All Messages", id="all_button", variant="primary")
+                    yield Button("Session Only", id="session_button")
+                    yield Button("Long Names", id="name_toggle_button", variant="primary")
+                    yield Static(f"Session started: {datetime.fromtimestamp(self.session_start_time).strftime('%H:%M:%S')}", id="session_info")
+                yield DataTable(id="packet_table")
+                yield Static("Total packets: 0 | Filtered: 0", id="stats")
+            
+            with TabPane("Topic Monitor", id="topic_tab"):
+                yield Input(placeholder="Enter topic name (e.g., meshtastic.receive)", id="topic_input")
+                with Horizontal(id="topic_controls"):
+                    yield Button("Subscribe", id="subscribe_button", variant="primary")
+                    yield Button("Unsubscribe", id="unsubscribe_button")
+                    yield Button("Clear Log", id="clear_log_button")
+                yield TextArea("", id="topic_log", read_only=True)
+        
         yield Footer()
     
     def on_mount(self) -> None:
@@ -469,6 +497,12 @@ class MeshtasticTUI(App):
                 event.button.label = "Hex IDs"
                 event.button.variant = "default"
             self.update_table()
+        elif event.button.id == "subscribe_button":
+            self.subscribe_to_topic()
+        elif event.button.id == "unsubscribe_button":
+            self.unsubscribe_from_topic()
+        elif event.button.id == "clear_log_button":
+            self.clear_topic_log()
     
     def on_input_changed(self, event: Input.Changed) -> None:
         """Called when filter input changes."""
@@ -617,7 +651,6 @@ class MeshtasticTUI(App):
         # Update stats
         session_text = " (Session only)" if self.session_filter_active else ""
         stats.update(f"Total packets: {len(packets)} | Filtered: {len(filtered_packets)}{session_text}")
-    
     def action_refresh(self) -> None:
         """Refresh the table."""
         self.update_table()
@@ -628,7 +661,78 @@ class MeshtasticTUI(App):
     
     def action_quit(self) -> None:
         """Quit the application."""
+        # Unsubscribe from any topic before quitting
+        if self.current_topic and self.topic_callback:
+            pub.unsubscribe(self.topic_callback, self.current_topic)
         self.exit()
+    
+    def subscribe_to_topic(self) -> None:
+        """Subscribe to the topic entered in the topic input field."""
+        topic_input = self.query_one("#topic_input", Input)
+        topic_log = self.query_one("#topic_log", TextArea)
+        
+        topic = topic_input.value.strip()
+        if not topic:
+            topic_log.text += f"[{datetime.now().strftime('%H:%M:%S')}] ERROR: Please enter a topic name\n"
+            return
+        
+        # Unsubscribe from current topic if any
+        if self.current_topic and self.topic_callback:
+            pub.unsubscribe(self.topic_callback, self.current_topic)
+          # Create callback function
+        def updateTopicLog(interface=None, *args, **kwargs):
+            timestamp = datetime.now().strftime('%H:%M:%S')
+            log_entry = f"[{timestamp}] Topic: {topic}\n"
+            if interface is not None:
+                log_entry += f"  Interface: {interface}\n"
+            log_entry += f"  Args: {args}\n"
+            log_entry += f"  Kwargs: {kwargs}\n"
+            log_entry += "---\n"
+            
+            # Update the text area (this needs to be done on the main thread)
+            try:
+                self.call_later(self._update_topic_log, log_entry)
+            except Exception as e:
+                # Fallback if call_later fails
+                print(f"Topic log update error: {e}")
+                print(log_entry)
+        
+        # Subscribe to the topic
+        try:
+            pub.subscribe(updateTopicLog, topic)
+            self.current_topic = topic
+            self.topic_callback = updateTopicLog
+            
+            topic_log.text += f"[{datetime.now().strftime('%H:%M:%S')}] Subscribed to topic: {topic}\n"
+            topic_log.text += "---\n"
+        except Exception as e:
+            topic_log.text += f"[{datetime.now().strftime('%H:%M:%S')}] ERROR subscribing to {topic}: {e}\n"
+    
+    def unsubscribe_from_topic(self) -> None:
+        """Unsubscribe from the current topic."""
+        topic_log = self.query_one("#topic_log", TextArea)
+        
+        if self.current_topic and self.topic_callback:
+            try:
+                pub.unsubscribe(self.topic_callback, self.current_topic)
+                topic_log.text += f"[{datetime.now().strftime('%H:%M:%S')}] Unsubscribed from topic: {self.current_topic}\n"
+                topic_log.text += "---\n"
+                self.current_topic = None
+                self.topic_callback = None
+            except Exception as e:
+                topic_log.text += f"[{datetime.now().strftime('%H:%M:%S')}] ERROR unsubscribing: {e}\n"
+        else:
+            topic_log.text += f"[{datetime.now().strftime('%H:%M:%S')}] No active subscription to unsubscribe from\n"
+    
+    def clear_topic_log(self) -> None:
+        """Clear the topic log."""
+        topic_log = self.query_one("#topic_log", TextArea)
+        topic_log.text = ""
+    
+    def _update_topic_log(self, log_entry: str) -> None:
+        """Update the topic log (called from main thread)."""
+        topic_log = self.query_one("#topic_log", TextArea)
+        topic_log.text += log_entry
 
 class PacketDetailModal(ModalScreen):
     """A modal screen to show detailed packet information."""
@@ -937,8 +1041,12 @@ def run_meshtastic_interface():
         while True:
             time.sleep(1)
             
+    except KeyboardInterrupt:
+        print("Meshtastic interface stopped by user")
     except Exception as e:
-        print(f"Error in meshtastic interface: {e}")
+        print(f"Unexpected exception, terminating meshtastic reader: {e}")
+        import traceback
+        traceback.print_exc()
 
 def add_test_packets():
     """Add some test packets and node info for demonstration."""
