@@ -20,6 +20,7 @@ from mt_backend import (
     get_node_name, store_node_info
 )
 
+import logging
 
 class PacketDetailModal(ModalScreen):
     """A modal screen to show detailed packet information."""
@@ -48,6 +49,24 @@ class PacketDetailModal(ModalScreen):
                     yield Label(f"Time: {datetime.fromtimestamp(self.packet_data.get('rxTime', 0)).strftime('%Y-%m-%d %H:%M:%S') if self.packet_data.get('rxTime') else 'N/A'}")
                     yield Label(f"Hop Limit: {self.packet_data.get('hopLimit', 'N/A')}")
                     yield Label(f"Priority: {self.packet_data.get('priority', 'N/A')}")
+                    
+                    # User Information
+                    yield Label("")
+                    yield Label("=== User Information ===")
+                    user_data = self.packet_data.get('user')
+                    if user_data:
+                        if isinstance(user_data, dict):
+                            yield Label(f"Long Name: {user_data.get('longName', 'N/A')}")
+                            yield Label(f"Short Name: {user_data.get('shortName', 'N/A')}")
+                            yield Label(f"Macaddr: {user_data.get('macaddr', 'N/A')}")
+                            yield Label(f"Hardware Model: {user_data.get('hwModel', 'N/A')}")
+                            yield Label(f"Public Key: {user_data.get('publicKey', 'N/A')}")
+                            yield Label(f"Role: {user_data.get('role', 'N/A')}")
+                            yield Label(f"Is Licensed: {user_data.get('isLicensed', 'N/A')}")
+                        else:
+                            yield Label(f"User Data: {str(user_data)}")
+                    else:
+                        yield Label("None")
                     
                     # Payload
                     yield Label("")
@@ -488,15 +507,22 @@ class MeshtasticTUI(App):
         # Unsubscribe from current topic if any
         if self.current_topic and self.topic_callback:
             pub.unsubscribe(self.topic_callback, self.current_topic)
-        
-        # Create callback function
-        def updateTopicLog(interface=None, *args, **kwargs):
+          # Create callback function
+        def updateTopicLog(*args, **kwargs):
             timestamp = datetime.now().strftime('%H:%M:%S')
             log_entry = f"[{timestamp}] Topic: {topic}\n"
-            if interface is not None:
-                log_entry += f"  Interface: {interface}\n"
-            log_entry += f"  Args: {args}\n"
-            log_entry += f"  Kwargs: {kwargs}\n"
+            
+            # Handle known parameters
+            if 'interface' in kwargs:
+                log_entry += f"  Interface: {kwargs['interface']}\n"
+            if 'line' in kwargs:
+                log_entry += f"  Line: {kwargs['line']}\n"
+            
+            # Show all args and kwargs for debugging
+            if args:
+                log_entry += f"  Args: {args}\n"
+            if kwargs:
+                log_entry += f"  Kwargs: {kwargs}\n"
             log_entry += "---\n"
             
             # Update the text area (this needs to be done on the main thread)
@@ -504,10 +530,8 @@ class MeshtasticTUI(App):
                 self.call_later(self._update_topic_log, log_entry)
             except Exception as e:
                 # Fallback if call_later fails
-                print(f"Topic log update error: {e}")
-                print(log_entry)
-        
-        # Subscribe to the topic
+                logging.error(f"Topic log update error: {e}")
+                # print(log_entry)        # Subscribe to the topic
         try:
             pub.subscribe(updateTopicLog, topic)
             self.current_topic = topic

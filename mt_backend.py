@@ -18,7 +18,6 @@ import random
 
 import logging
 
-logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 # Global packet list for the TUI
@@ -343,11 +342,13 @@ def remove_key_recursive(data, key_to_remove):
 class Decoded:
     portnum: str
     payload: bytes
-    telemetry: Optional[dict]
-    position: Optional[dict]
-    bitfield: Optional[int]
+    telemetry: Optional[dict] = None  
+    position: Optional[dict] = None
+    user: Optional[dict] = None  
+    bitfield: Optional[int] = None
+    wantResponse: Optional[bool] = None
     notes: Optional[str] = None
-    data_original: Optional[Any] = None  # Store original data for debugging
+    payload_original: Optional[Any] = None  # Store original data for debugging
 
     @classmethod
     def from_dict(cls, data):
@@ -359,7 +360,9 @@ class Decoded:
             telemetry=data.pop("telemetry", None),
             position=data.pop("position", None),
             bitfield=data.pop("bitfield", None),
-            data_original=data,  # Store original data for debugging
+            user=data.pop("user", None),
+            wantResponse=data.pop("wantResponse", None),
+            payload_original=data,  # Store original data for debugging
         )
         if data.keys():
             # log.warning(f"Decoded.from_dict: Unrecognized keys {data.keys()} in data: {data}")
@@ -379,20 +382,27 @@ class Packet:
     priority: str
     decoded: 'Decoded'
     raw: Optional[bytes] = None
+    packet_original: Optional[Any] = None  # Store original data for debugging
 
     @classmethod
     def from_dict(cls, data):
+        data = data.copy()  # Avoid modifying the original data
+        if 'encrypted' not in data:
+            decoded = Decoded.from_dict(data.pop("decoded", {}))
+        else:
+            decoded = Decoded('', b'encrypted')
         return cls(
-            id=data.get("id", 0),
-            from_=data.get("from", 0),
-            to=data.get("to", 0),
-            fromId=data.get("fromId", ""),
-            toId=data.get("toId", ""),
-            rxTime=data.get("rxTime", 0),
-            hopLimit=data.get("hopLimit", 0),
-            priority=data.get("priority", ""),
-            decoded=Decoded.from_dict(data.get("decoded", {})),
-            raw=data.get("raw", None),
+            id=data.pop("id", 0),
+            from_=data.pop("from", 0),
+            to=data.pop("to", 0),
+            fromId=data.pop("fromId", ""),
+            toId=data.pop("toId", ""),
+            rxTime=data.pop("rxTime", decoded.telemetry.get('time', int(time.time())) if decoded.telemetry else int(time.time())),
+            hopLimit=data.pop("hopLimit", 0),
+            priority=data.pop("priority", ""),
+            decoded=decoded,
+            raw=data.pop("raw", None),
+            packet_original=data  # Store original data for debugging
         )
 
 def onReceive(packet, interface):
@@ -410,6 +420,20 @@ def onReceive(packet, interface):
         # Process position data if available
         # if parsed_packet.decoded.position:
         #     processing_notes.append("Position data available")
+
+        if parsed_packet.decoded.portnum == 'NODEINFO_APP':
+            # store or update node information
+            user = parsed_packet.decoded.user or {}
+            store_node_info(
+                user.get('id', parsed_packet.fromId),
+                {'user': {
+                    'longName': user.get('longName', ''),
+                    'shortName': user.get('shortName', ''),
+                    'hwModel': user.get('hwModel', ''),
+                    'firmwareVersion': user.get('firmwareVersion', ''),
+                    'role': user.get('role', '')
+                }}
+            )
         
         # Check for notes from packet processing
         if parsed_packet.decoded.notes:
@@ -442,11 +466,16 @@ def onReceive(packet, interface):
                 'rxTime': parsed_packet.rxTime,
                 'hopLimit': parsed_packet.hopLimit,
                 'priority': parsed_packet.priority,
+                'notes': "; ".join(processing_notes) if processing_notes else "",
+                'payload_original': parsed_packet.decoded.payload_original,
+                'packet_original': parsed_packet.packet_original
+            }
+            if parsed_packet.decoded:
+                u = {
                 'telemetry': parsed_packet.decoded.telemetry,
                 'position': parsed_packet.decoded.position,
-                'notes': "; ".join(processing_notes) if processing_notes else "",
-                'data_original': parsed_packet.decoded.data_original
-            }
+                }
+                packet_info.update(u)
             packet_list.append(packet_info)
             
             # Keep only last 1000 packets in memory
