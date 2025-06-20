@@ -262,6 +262,8 @@ class MeshtasticTUI(App):
         
         self.filter_debounce_timer = None  # Timer for debouncing filter input
         self.node_name_cache = {}  # Cache for node names to improve performance
+        self._last_rows = []
+        self._last_row_key = None
 
     def compose(self) -> ComposeResult:
         """Create child widgets for the app."""
@@ -410,7 +412,7 @@ class MeshtasticTUI(App):
         if self.session_filter_active:
             packets = [p for p in packets if p.get('rxTime', 0) >= self.session_start_time]
           # Clear existing rows
-        table.clear()
+        rows = []
         
         # Filter packets based on filter text
         filtered_packets = []
@@ -516,8 +518,30 @@ class MeshtasticTUI(App):
             # Generate notes based on packet processing
             notes = packet.get('notes', '')
             
-            table.add_row(time_str, from_display, to_display, portnum, payload_str, hop_limit, priority, telemetry_str, position_str, notes)
+            rows.append((time_str, from_display, to_display, portnum, payload_str, hop_limit, priority, telemetry_str, position_str, notes))
         
+        if tuple(self._last_rows) == tuple(rows):
+            return 
+
+        self._last_rows = rows
+        # Get the currently highlighted row's time and from_id before clearing
+        highlighted_row_index = table.cursor_row if table.row_count > 0 else None
+        highlighted_time = None
+        highlighted_from_id = None
+        if highlighted_row_index is not None and 0 <= highlighted_row_index < len(self._last_rows):
+            highlighted_time = self._last_rows[highlighted_row_index][0]
+            highlighted_from_id = self._last_rows[highlighted_row_index][1]
+
+        table.clear()
+        selected_index = 0
+        for idx, row in enumerate(rows):
+            table.add_row(*row)
+            # Try to find the row matching the previously highlighted row
+            if highlighted_time is not None and highlighted_from_id is not None:
+                if row[0] == highlighted_time and row[1] == highlighted_from_id:
+                    selected_index = idx + 1        
+        if rows:
+            table.move_cursor(row=selected_index)
         # Update stats
         session_text = " (Session only)" if self.session_filter_active else ""
         stats.update(f"Total packets: {len(packets)} | Filtered: {len(filtered_packets)}{session_text}")

@@ -407,12 +407,12 @@ class Packet:
             decoded = Decoded('', b'encrypted')
         return cls(
             id=data.pop("id", 0),
-            from_=data.pop("from", 0),
-            to=data.pop("to", 0),
+            from_=data.get("from", 0),
+            to=data.get("to", 0),
             fromId=data.pop("fromId", ""),
             toId=data.pop("toId", ""),
-            rxTime=data.pop("rxTime", decoded.telemetry.get('time', int(time.time())) if decoded.telemetry else int(time.time())),
-            hopLimit=data.pop("hopLimit", 0),
+            rxTime=data.get("rxTime", decoded.telemetry.get('time', int(time.time())) if decoded.telemetry else int(time.time())),
+            hopLimit=data.get("hopLimit", 0),
             priority=data.pop("priority", ""),
             decoded=decoded,
             raw=data.pop("raw", None),
