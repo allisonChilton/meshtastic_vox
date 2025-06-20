@@ -8,6 +8,7 @@ import time
 import meshtastic.ble_interface
 import meshtastic.serial_interface
 from pubsub import pub
+from pubsub.core import Topic
 from dataclasses import dataclass
 from typing import Any, Optional
 import sqlite3
@@ -23,6 +24,7 @@ log = logging.getLogger(__name__)
 # Global packet list for the TUI
 packet_list = []
 packet_list_lock = threading.Lock()
+subtopics = []
 
 # Database setup
 def init_database():
@@ -505,6 +507,14 @@ def onReceive(packet, interface):
             }
             packet_list.append(error_packet)
 
+def recursive_topic_gather(node: Topic):
+    """Recursively gather all subtopics from the root topic."""
+    st = node.getSubtopics()
+    for topic in st:
+        subtopics.append(topic.name)
+        recursive_topic_gather(topic)
+    return subtopics
+
 def run_meshtastic_interface():
     """Run the meshtastic interface in a separate thread."""
     try:
@@ -518,10 +528,19 @@ def run_meshtastic_interface():
         interface = meshtastic.serial_interface.SerialInterface('COM4')
         
         print("Meshtastic interface started...")
+
+        first = True
         
         # Keep the interface running
         while True:
-            time.sleep(1)
+            if first:
+                first = False
+                time.sleep(5)
+                mgr = pub.getDefaultTopicMgr()
+                root = mgr.getRootAllTopics()
+                recursive_topic_gather(root)
+
+            time.sleep(60)
             
     except KeyboardInterrupt:
         print("Meshtastic interface stopped by user")

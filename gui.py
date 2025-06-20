@@ -16,7 +16,7 @@ from pubsub import pub
 
 # Import database and packet functions from the main module
 from mt_backend import (
-    packet_list, packet_list_lock, load_packets_from_database,
+    packet_list, packet_list_lock, subtopics, load_packets_from_database,
     get_node_name, store_node_info
 )
 
