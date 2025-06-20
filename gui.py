@@ -16,7 +16,7 @@ from pubsub import pub
 
 # Import database and packet functions from the main module
 from mt_backend import (
-    packet_list, packet_list_lock, subtopics, load_packets_from_database,
+    packet_list, packet_list_lock, load_packets_from_database,
     get_node_name, store_node_info
 )
 
@@ -259,6 +259,7 @@ class MeshtasticTUI(App):
         self.update_timer = None
         self.current_topic = None  # Track current subscription topic
         self.topic_callback = None  # Store callback reference
+        
         self.filter_debounce_timer = None  # Timer for debouncing filter input
         self.node_name_cache = {}  # Cache for node names to improve performance
 
@@ -357,21 +358,37 @@ class MeshtasticTUI(App):
             
             with packet_list_lock:
                 packets = packet_list.copy()
-            
-            # Apply current filters to get the same filtered list as displayed
+              # Apply current filters to get the same filtered list as displayed
             if self.session_filter_active:
                 packets = [p for p in packets if p.get('rxTime', 0) >= self.session_start_time]
             
             if self.filter_text:
                 filtered_packets = []
                 for packet in packets:
-                    search_text = f"{packet.get('fromId', '')} {packet.get('toId', '')} {packet.get('portnum', '')} {packet.get('payload', '')} {packet.get('priority', '')} {packet.get('notes', '')}".lower()
+                    # Get node names for from and to IDs using cache
+                    from_id = packet.get('fromId', '')
+                    to_id = packet.get('toId', '')
+                    from_long_name = self.get_cached_node_name(from_id) if from_id else ''
+                    to_long_name = self.get_cached_node_name(to_id) if to_id else ''
+                    
+                    # Search in various fields including new columns and long names
+                    search_text = f"{from_id} {to_id} {from_long_name} {to_long_name} {packet.get('portnum', '')} {packet.get('payload', '')} {packet.get('priority', '')} {packet.get('notes', '')}".lower()
+                    # Also search in telemetry and position data
                     if packet.get('telemetry'):
                         search_text += f" {str(packet['telemetry'])}".lower()
                     if packet.get('position'):
                         search_text += f" {str(packet['position'])}".lower()
-                    if self.filter_text in search_text:
-                        filtered_packets.append(packet)
+                    
+                    # Check if this is an exclusion filter (starts with !)
+                    if self.filter_text.startswith('!'):
+                        # Exclude packets that contain the substring after the !
+                        exclude_text = self.filter_text[1:]  # Remove the ! prefix
+                        if exclude_text and exclude_text not in search_text:
+                            filtered_packets.append(packet)
+                    else:
+                        # Normal inclusion filter
+                        if self.filter_text in search_text:
+                            filtered_packets.append(packet)
                 packets = filtered_packets
             
             # Get the packet data for the selected row (accounting for reverse order display)
