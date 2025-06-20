@@ -16,6 +16,7 @@ import json
 from datetime import datetime
 import threading
 import random
+from functools import lru_cache
 
 import logging
 
@@ -24,7 +25,18 @@ log = logging.getLogger(__name__)
 # Global packet list for the TUI
 packet_list = []
 packet_list_lock = threading.Lock()
-subtopics = []
+
+# Subtopics dictionary with descriptions
+subtopics = {
+    "meshtastic.connection.established": "published once we've successfully connected to the radio and downloaded the node DB",
+    "meshtastic.connection.lost": "published once we've lost our link to the radio",
+    "meshtastic.receive.text": "delivers a received packet as a dictionary, if you only care about a particular type of packet, you should subscribe to the full topic name. If you want to see all packets, simply subscribe to \"meshtastic.receive\".",
+    "meshtastic.receive.position": "delivers a received position packet",
+    "meshtastic.receive.user": "delivers a received user packet", 
+    "meshtastic.receive.data.portnum": "delivers a received data packet (where portnum is an integer or well known PortNum enum)",
+    "meshtastic.node.updated": "published when a node in the DB changes (appears, location changed, username changed, etc…)",
+    "meshtastic.log.line": "a raw unparsed log line from the radio"
+}
 
 # Database setup
 def init_database():
@@ -511,7 +523,9 @@ def recursive_topic_gather(node: Topic):
     """Recursively gather all subtopics from the root topic."""
     st = node.getSubtopics()
     for topic in st:
-        subtopics.append(topic.name)
+        # Add topic as key with None value if not already present
+        if topic.name not in subtopics:
+            subtopics[topic.name] = None
         recursive_topic_gather(topic)
     return subtopics
 
@@ -529,18 +543,17 @@ def run_meshtastic_interface():
         
         print("Meshtastic interface started...")
 
-        first = True
+        refresh = 5
+        mgr = pub.getDefaultTopicMgr()
+        root = mgr.getRootAllTopics()
         
         # Keep the interface running
         while True:
-            if first:
-                first = False
-                time.sleep(5)
-                mgr = pub.getDefaultTopicMgr()
-                root = mgr.getRootAllTopics()
-                recursive_topic_gather(root)
+            time.sleep(refresh)
+            recursive_topic_gather(root)
+            if refresh == 5:
+                refresh = 60
 
-            time.sleep(60)
             
     except KeyboardInterrupt:
         print("Meshtastic interface stopped by user")

@@ -246,8 +246,7 @@ class MeshtasticTUI(App):
     
     BINDINGS = [
         Binding("ctrl+c", "quit", "Quit"),        
-        Binding("ctrl+r", "refresh", "Refresh"),
-        Binding("ctrl+f", "focus_filter", "Focus Filter"),
+        Binding("ctrl+r", "refresh", "Refresh"),        Binding("ctrl+f", "focus_filter", "Focus Filter"),
         Binding("ctrl+s", "toggle_session_filter", "Session Filter"),
     ]
     
@@ -260,14 +259,16 @@ class MeshtasticTUI(App):
         self.update_timer = None
         self.current_topic = None  # Track current subscription topic
         self.topic_callback = None  # Store callback reference
-    
+        self.filter_debounce_timer = None  # Timer for debouncing filter input
+        self.node_name_cache = {}  # Cache for node names to improve performance
+
     def compose(self) -> ComposeResult:
         """Create child widgets for the app."""
         yield Static("Meshtastic Packet Monitor", classes="header", id="header")
         
         with TabbedContent():
             with TabPane("Packets", id="packets_tab"):
-                yield Input(placeholder="Filter packets (node ID, portnum, etc.)", id="filter_input")
+                yield Input(placeholder="Filter packets (node ID, portnum, etc.) - use !text to exclude", id="filter_input")
                 with Horizontal(id="controls"):
                     yield Button("All Messages", id="all_button", variant="primary")
                     yield Button("Session Only", id="session_button")
@@ -282,6 +283,7 @@ class MeshtasticTUI(App):
                     yield Button("Subscribe", id="subscribe_button", variant="primary")
                     yield Button("Unsubscribe", id="unsubscribe_button")
                     yield Button("Clear Log", id="clear_log_button")
+                    yield Button("Show Topics", id="show_topics_button", variant="success")
                 yield TextArea("", id="topic_log", read_only=True)
         
         yield Footer()
@@ -327,12 +329,24 @@ class MeshtasticTUI(App):
             self.unsubscribe_from_topic()
         elif event.button.id == "clear_log_button":
             self.clear_topic_log()
+        elif event.button.id == "show_topics_button":            self.show_available_topics()
     
     def on_input_changed(self, event: Input.Changed) -> None:
         """Called when filter input changes."""
         if event.input.id == "filter_input":
             self.filter_text = event.value.lower()
-            self.update_table()
+            
+            # Cancel any existing debounce timer
+            if self.filter_debounce_timer:
+                self.filter_debounce_timer.cancel()
+              # Set a new timer to delay the filter update
+            self.filter_debounce_timer = threading.Timer(0.3, self._delayed_update_table)
+            self.filter_debounce_timer.start()
+    
+    def _delayed_update_table(self) -> None:
+        """Safely update table from timer thread."""
+        # Use call_from_thread to safely update UI from timer thread
+        self.call_from_thread(self.update_table)
     
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Called when a row is selected in the packet table."""
@@ -378,42 +392,54 @@ class MeshtasticTUI(App):
         # Apply session filter if active
         if self.session_filter_active:
             packets = [p for p in packets if p.get('rxTime', 0) >= self.session_start_time]
-        
-        # Clear existing rows
+          # Clear existing rows
         table.clear()
         
         # Filter packets based on filter text
         filtered_packets = []
         if self.filter_text:
             for packet in packets:
-                # Search in various fields including new columns
-                search_text = f"{packet.get('fromId', '')} {packet.get('toId', '')} {packet.get('portnum', '')} {packet.get('payload', '')} {packet.get('priority', '')} {packet.get('notes', '')}".lower()
+                # Get node names for from and to IDs using cache
+                from_id = packet.get('fromId', '')
+                to_id = packet.get('toId', '')
+                from_long_name = self.get_cached_node_name(from_id) if from_id else ''
+                to_long_name = self.get_cached_node_name(to_id) if to_id else ''
+                
+                # Search in various fields including new columns and long names
+                search_text = f"{from_id} {to_id} {from_long_name} {to_long_name} {packet.get('portnum', '')} {packet.get('payload', '')} {packet.get('priority', '')} {packet.get('notes', '')}".lower()
                 # Also search in telemetry and position data
                 if packet.get('telemetry'):
                     search_text += f" {str(packet['telemetry'])}".lower()
                 if packet.get('position'):
                     search_text += f" {str(packet['position'])}".lower()
                 
-                if self.filter_text in search_text:
-                    filtered_packets.append(packet)
+                # Check if this is an exclusion filter (starts with !)
+                if self.filter_text.startswith('!'):
+                    # Exclude packets that contain the substring after the !
+                    exclude_text = self.filter_text[1:]  # Remove the ! prefix
+                    if exclude_text and exclude_text not in search_text:
+                        filtered_packets.append(packet)
+                else:
+                    # Normal inclusion filter
+                    if self.filter_text in search_text:
+                        filtered_packets.append(packet)
         else:
             filtered_packets = packets
         
         # Add filtered packets to table (show most recent first)
         for packet in reversed(filtered_packets[-100:]):  # Show last 100 packets
             time_str = datetime.fromtimestamp(packet.get('rxTime', 0)).strftime('%H:%M:%S') if packet.get('rxTime') else 'N/A'
-            
-            # Handle From ID with name toggle
+              # Handle From ID with name toggle
             from_id = packet.get('fromId', 'N/A')
             if self.show_long_names and from_id != 'N/A':
-                from_display = get_node_name(from_id)
+                from_display = self.get_cached_node_name(from_id)
             else:
                 from_display = from_id
                 
             # Handle To ID with name toggle  
             to_id = packet.get('toId', 'N/A')
             if self.show_long_names and to_id != 'N/A':
-                to_display = get_node_name(to_id)
+                to_display = self.get_cached_node_name(to_id)
             else:
                 to_display = to_id
                 
@@ -567,3 +593,47 @@ class MeshtasticTUI(App):
         """Update the topic log (called from main thread)."""
         topic_log = self.query_one("#topic_log", TextArea)
         topic_log.text += log_entry
+    
+    def show_available_topics(self) -> None:
+        """Show all available subtopics in the log."""
+        topic_log = self.query_one("#topic_log", TextArea)
+        
+        timestamp = datetime.now().strftime('%H:%M:%S')
+        topic_log.text += f"[{timestamp}] Available Topics:\n"
+        topic_log.text += "=" * 40 + "\n"
+        
+        # Import subtopics from the backend
+        from mt_backend import subtopics
+        
+        if subtopics:
+            for i, (topic, description) in enumerate(sorted(subtopics.items()), 1):
+                if description:
+                    topic_log.text += f"{i:2d}. {topic}\n"
+                    topic_log.text += f"    {description}\n\n"
+                else:
+                    topic_log.text += f"{i:2d}. {topic}\n\n"
+            topic_log.text += f"Total: {len(subtopics)} topics available\n"
+        else:
+            topic_log.text += "No topics available yet. Topics are discovered as packets are received.\n"
+        
+        topic_log.text += "=" * 40 + "\n"
+        topic_log.text += f"[{timestamp}] End of topic list\n\n"
+    
+    def get_cached_node_name(self, node_id: str) -> str:
+        """Get node name with caching for better performance."""
+        if not node_id or node_id == 'N/A':
+            return node_id
+            
+        # Check cache first
+        if node_id in self.node_name_cache:
+            return self.node_name_cache[node_id]
+            
+        # Get name and cache it
+        name = get_node_name(node_id)
+        self.node_name_cache[node_id] = name
+        return name
+    
+    def clear_node_name_cache(self) -> None:
+        """Clear the node name cache when nodes are updated."""
+        self.node_name_cache.clear()
+
