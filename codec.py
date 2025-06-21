@@ -8,6 +8,7 @@ import io
 import os
 from typing import Tuple, Union, BinaryIO, Optional
 import logging
+from typing_extensions import Literal
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -134,7 +135,7 @@ class BitPacker:
 class AudioCodec:
     """Audio codec for encoding and decoding audio using FocalCodec."""
     
-    def __init__(self, config_name: str = "25hz"):
+    def __init__(self, config_name: Literal["25hz"] | Literal["12_5hz"] | Literal["50hz"] = "25hz"):
         """
         Initialize the audio codec.
         
@@ -247,9 +248,13 @@ class AudioCodec:
         logger.info(f"Decoded {len(compressed_data)} bytes to {metadata['audio_duration']:.2f}s audio")
         if as_bytes:
             # Convert to bytes
-            audio_data = audio_data.numpy().tobytes()
-            logger.debug(f"Converted audio tensor to bytes ({len(audio_data)} bytes)")
-            return audio_data
+            # audio_data = audio_data.numpy().tobytes()
+            # logger.debug(f"Converted audio tensor to bytes ({len(audio_data)} bytes)")
+            # return audio_data
+            decoded_audio_stream = io.BytesIO()
+            torchaudio.save(decoded_audio_stream, audio_data, target_sample_rate, format='wav', bits_per_sample=16)
+            decoded_audio_stream.seek(0)
+            audio_data = decoded_audio_stream.read()
         return audio_data
     
     def get_compression_stats(self, metadata: dict) -> dict:

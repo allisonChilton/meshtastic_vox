@@ -21,6 +21,7 @@ from mt_backend import (
 )
 from audio import MicrophoneRecorder
 
+
 import logging
 
 class PacketDetailModal(ModalScreen):
@@ -291,6 +292,11 @@ class MeshtasticTUI(App):
         self.recording_timer = None
         self.is_paused = False
         self.last_recorded_audio = None  # Store the last recording for playback
+        
+        # Codec variables
+        self.codec = None  # Will be initialized in on_mount
+        self.encoded_audio_data = None  # Store encoded audio bytes
+        self.encoded_metadata = None  # Store encoding metadata
 
     def compose(self) -> ComposeResult:
         """Create child widgets for the app."""
@@ -328,13 +334,19 @@ class MeshtasticTUI(App):
                         yield Select([], id="input_device_select")
                         yield Label("Output Device:")
                         yield Select([], id="output_device_select")
-                        
                         with Horizontal(id="record_controls"):
                             yield Button("Record", id="record_button", variant="primary")
                             yield Button("Play", id="play_button", disabled=True)
                             yield Button("Reset", id="reset_button", disabled=True)
                         
                         yield Label("Recording time: 00:00", id="recording_time_label")
+                        
+                        # Gap between recording and encoding controls
+                        yield Label("")
+                        
+                        with Horizontal(id="encode_controls"):
+                            yield Button("Encode", id="encode_button", disabled=True)
+                            yield Button("Preview", id="preview_button", disabled=True)
         
         yield Footer()
     
@@ -348,9 +360,17 @@ class MeshtasticTUI(App):
         load_packets_from_database()
           # Start updating the table periodically
         self.set_interval(2.0, self.update_table)
-        
-        # Populate audio devices for Vox Msg tab
+          # Populate audio devices for Vox Msg tab
         self.populate_audio_devices()
+        
+        # Initialize codec for audio encoding
+        try:
+            import codec
+            self.codec = codec.AudioCodec("12_5hz")
+            self.log("Audio codec initialized successfully")
+        except Exception as e:
+            self.log(f"Failed to initialize codec: {e}")
+            self.codec = None
         
         # Focus the filter input
         self.query_one("#filter_input", Input).focus()
@@ -390,6 +410,10 @@ class MeshtasticTUI(App):
             self.reset_recording()
         elif event.button.id == "play_button":
             self.play_recording()
+        elif event.button.id == "encode_button":
+            self.encode_audio()
+        elif event.button.id == "preview_button":
+            self.preview_encoded_audio()
     
     def on_input_changed(self, event: Input.Changed) -> None:
         """Called when filter input changes."""
@@ -784,6 +808,7 @@ class MeshtasticTUI(App):
         record_button = self.query_one("#record_button", Button)
         reset_button = self.query_one("#reset_button", Button)
         play_button = self.query_one("#play_button", Button)
+        encode_button = self.query_one("#encode_button", Button)
         
         if not self.microphone_recorder.is_recording and not self.is_paused:
             # Start recording for the first time
@@ -829,6 +854,7 @@ class MeshtasticTUI(App):
             audio_data = self.microphone_recorder.pause_recording()
             if audio_data:
                 self.last_recorded_audio = audio_data
+                encode_button.disabled = False  # Enable encoding after recording
             
         elif self.is_paused:
             # Resume recording - restart timing
@@ -850,6 +876,8 @@ class MeshtasticTUI(App):
         reset_button = self.query_one("#reset_button", Button)
         play_button = self.query_one("#play_button", Button)
         time_label = self.query_one("#recording_time_label", Label)
+        encode_button = self.query_one("#encode_button", Button)
+        preview_button = self.query_one("#preview_button", Button)
         
         # Stop recording if active
         if self.microphone_recorder.is_recording:
@@ -873,8 +901,69 @@ class MeshtasticTUI(App):
         self.is_paused = False
         self.last_recorded_audio = None
         play_button.label = "Play"
+        encode_button.disabled = True  # Disable encoding until new recording
+        encode_button.variant = "default"
+        preview_button.disabled = True  # Disable preview until encoding
         
         self.log("Recording reset")
+
+    def _play_audio(self, audio_data: bytes, sample_rate: float, play_button) -> None:            
+        # Create a temporary wave file in memory to play
+        import io
+        import wave
+        import threading
+        
+        # # Create a BytesIO buffer and write WAV data
+        # audio_buffer = io.BytesIO()
+        # with wave.open(audio_buffer, 'wb') as wav_file:
+        #     wav_file.setnchannels(self.microphone_recorder.channels)
+        #     wav_file.setsampwidth(self.microphone_recorder.audio.get_sample_size(self.microphone_recorder.format))
+        #     wav_file.setframerate(self.microphone_recorder.sample_rate)
+        #     wav_file.writeframes(audio_data)
+        
+        # audio_buffer.seek(0)
+
+        previous_label = play_button.label  # Store previous label
+        
+        # Play audio in a separate thread
+        def play_audio_thread():
+            try:
+                # Disable the play button during playback
+                self.call_from_thread(lambda: setattr(play_button, "disabled", True))
+                self.call_from_thread(lambda: setattr(play_button, "label", "Playing..."))
+                
+                # Open output stream
+                output_stream = self.microphone_recorder.audio.open(
+                    format=self.microphone_recorder.format,
+                    channels=self.microphone_recorder.channels,
+                    rate=sample_rate,
+                    output=True
+                )
+                
+                # Play the audio data
+                chunk_size = self.microphone_recorder.chunk_size
+                
+                for i in range(0, len(audio_data), chunk_size):
+                    chunk = audio_data[i:i + chunk_size]
+                    output_stream.write(chunk)
+                
+                output_stream.stop_stream()
+                output_stream.close()
+                
+                self.call_from_thread(lambda: self.log("Playback completed"))
+                
+            except Exception as e:
+                self.call_from_thread(lambda: self.log(f"Error during playback: {e}"))
+            finally:
+                # Re-enable the play button
+                self.call_from_thread(lambda: setattr(play_button, "disabled", False))
+                self.call_from_thread(lambda: setattr(play_button, "label", previous_label))
+        
+        # Start playback in separate thread
+        playback_thread = threading.Thread(target=play_audio_thread, daemon=True)
+        playback_thread.start()
+        
+        self.log("Starting playback...")
     
     def play_recording(self) -> None:
         """Play the last recorded audio."""
@@ -885,64 +974,82 @@ class MeshtasticTUI(App):
         play_button = self.query_one("#play_button", Button)
         
         try:
-            # Create a temporary wave file in memory to play
-            import io
-            import wave
-            import threading
-            
-            # Create a BytesIO buffer and write WAV data
-            audio_buffer = io.BytesIO()
-            with wave.open(audio_buffer, 'wb') as wav_file:
-                wav_file.setnchannels(self.microphone_recorder.channels)
-                wav_file.setsampwidth(self.microphone_recorder.audio.get_sample_size(self.microphone_recorder.format))
-                wav_file.setframerate(self.microphone_recorder.sample_rate)
-                wav_file.writeframes(self.last_recorded_audio)
-            
-            audio_buffer.seek(0)
-            
-            # Play audio in a separate thread
-            def play_audio():
-                try:
-                    # Disable the play button during playback
-                    self.call_from_thread(lambda: setattr(play_button, "disabled", True))
-                    self.call_from_thread(lambda: setattr(play_button, "label", "Playing..."))
-                    
-                    # Open output stream
-                    output_stream = self.microphone_recorder.audio.open(
-                        format=self.microphone_recorder.format,
-                        channels=self.microphone_recorder.channels,
-                        rate=self.microphone_recorder.sample_rate,
-                        output=True
-                    )
-                    
-                    # Play the audio data
-                    chunk_size = self.microphone_recorder.chunk_size
-                    audio_data = self.last_recorded_audio
-                    
-                    for i in range(0, len(audio_data), chunk_size):
-                        chunk = audio_data[i:i + chunk_size]
-                        output_stream.write(chunk)
-                    
-                    output_stream.stop_stream()
-                    output_stream.close()
-                    
-                    self.call_from_thread(lambda: self.log("Playback completed"))
-                    
-                except Exception as e:
-                    self.call_from_thread(lambda: self.log(f"Error during playback: {e}"))
-                finally:
-                    # Re-enable the play button
-                    self.call_from_thread(lambda: setattr(play_button, "disabled", False))
-                    self.call_from_thread(lambda: setattr(play_button, "label", "Play"))
-            
-            # Start playback in separate thread
-            playback_thread = threading.Thread(target=play_audio, daemon=True)
-            playback_thread.start()
-            
-            self.log("Starting playback...")
+            self._play_audio(self.last_recorded_audio, self.microphone_recorder.sample_rate, play_button)
             
         except Exception as e:
             self.log(f"Error starting playback: {e}")
             play_button.disabled = False
             play_button.label = "Play"
+    
+    def encode_audio(self) -> None:
+        """Encode the recorded audio using the codec."""
+        if not self.last_recorded_audio:
+            self.log("No recorded audio to encode")
+            return
+            
+        if not self.codec:
+            self.log("Codec not available")
+            return
+            
+        try:
+            # Convert raw audio bytes to tensor
+            import numpy as np
+            import torch
+            
+            # Convert bytes to numpy array (assuming 16-bit PCM)
+            audio_array = np.frombuffer(self.last_recorded_audio, dtype=np.int16)
+            
+            # Convert to float tensor and normalize
+            audio_tensor = torch.from_numpy(audio_array).float() / 32768.0
+            
+            # Add batch dimension and ensure it's 2D (batch, samples)
+            if audio_tensor.dim() == 1:
+                audio_tensor = audio_tensor.unsqueeze(0)
+            
+            # Encode the audio
+            _, encoded_data, metadata = self.codec.encode_audio(audio_tensor, sample_rate=self.microphone_recorder.sample_rate)
+            
+            # Store the encoded data
+            self.encoded_audio_data = encoded_data
+            self.encoded_metadata = metadata
+            
+            # Enable preview button
+            preview_button = self.query_one("#preview_button", Button)
+            preview_button.disabled = False
+            
+            # Update encode button to show success
+            encode_button = self.query_one("#encode_button", Button)
+            encode_button.variant = "success"
+            encode_button.label = "Encoded"
+            
+            # Log compression stats
+            original_size = len(self.last_recorded_audio)
+            compressed_size = len(encoded_data)
+            compression_ratio = original_size / compressed_size if compressed_size > 0 else 0
+            
+            self.log(f"Audio encoded: {original_size} → {compressed_size} bytes (ratio: 1:{compression_ratio:.0f})")
+            
+        except Exception as e:
+            self.log(f"Encoding failed: {e}")
+    
+    def preview_encoded_audio(self) -> None:
+        """Preview the encoded audio by decoding and playing it."""
+        if not self.encoded_audio_data or not self.encoded_metadata:
+            self.log("No encoded audio to preview")
+            return
+            
+        if not self.codec:
+            self.log("Codec not available")
+            return
+            
+        try:
+            prev_btn = self.query_one("#preview_button", Button)
+            tgt_sr = self.microphone_recorder.sample_rate
+            # Decode the audio
+            audio_data = self.codec.decode_audio(self.encoded_audio_data, metadata=self.encoded_metadata, target_sample_rate=tgt_sr, as_bytes=True)
+
+            self._play_audio(audio_data, tgt_sr, prev_btn)
+            
+        except Exception as e:
+            self.log(f"Preview failed: {e}")
 
