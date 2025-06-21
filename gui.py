@@ -7,6 +7,7 @@ import time
 import json
 from datetime import datetime
 import threading
+from typing import List
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.widgets import DataTable, Input, Static, Button, Log, Footer, Label, TabbedContent, TabPane, TextArea, Select
@@ -148,6 +149,30 @@ class PacketDetailModal(ModalScreen):
             self.dismiss()
 
 
+class PacketTable(Container):
+    """A custom widget that encapsulates the packet table and its controls."""
+    
+    def __init__(self, session_start_time: float = None, **kwargs):
+        super().__init__(**kwargs)
+        # Use provided session start time or create a new one
+        self.session_start_time = session_start_time or time.time()
+    
+    def compose(self) -> ComposeResult:
+        """Create the packet table widget content."""
+        yield Input(placeholder="Filter packets (node ID, portnum, etc.) - use !text to exclude", id="filter_input")
+        with Horizontal(id="controls"):
+            yield Button("All Messages", id="all_button", variant="primary")
+            yield Button("Session Only", id="session_button")
+            yield Button("Long Names", id="name_toggle_button", variant="primary")
+            yield Static(f"Session started: {datetime.fromtimestamp(self.session_start_time).strftime('%H:%M:%S')}", id="session_info")
+        yield DataTable(id="packet_table")
+        yield Static("Total packets: 0 | Filtered: 0", id="stats")
+
+    def add_columns(self, *args):
+        table = self.query_one(DataTable)
+        table.add_columns(*args)
+        table.cursor_type = "row"
+
 class MeshtasticTUI(App):
     """A textual TUI for displaying Meshtastic packets with filtering."""
     
@@ -284,7 +309,8 @@ class MeshtasticTUI(App):
     
     BINDINGS = [
         Binding("ctrl+c", "quit", "Quit"),        
-        Binding("ctrl+r", "refresh", "Refresh"),        Binding("ctrl+f", "focus_filter", "Focus Filter"),
+        Binding("ctrl+r", "refresh", "Refresh"),        
+        Binding("ctrl+f", "focus_filter", "Focus Filter"),
         Binding("ctrl+s", "toggle_session_filter", "Session Filter"),
     ]
     
@@ -319,14 +345,7 @@ class MeshtasticTUI(App):
         
         with TabbedContent():
             with TabPane("Packets", id="packets_tab"):
-                yield Input(placeholder="Filter packets (node ID, portnum, etc.) - use !text to exclude", id="filter_input")
-                with Horizontal(id="controls"):
-                    yield Button("All Messages", id="all_button", variant="primary")
-                    yield Button("Session Only", id="session_button")
-                    yield Button("Long Names", id="name_toggle_button", variant="primary")
-                    yield Static(f"Session started: {datetime.fromtimestamp(self.session_start_time).strftime('%H:%M:%S')}", id="session_info")
-                yield DataTable(id="packet_table")
-                yield Static("Total packets: 0 | Filtered: 0", id="stats")
+                yield PacketTable(session_start_time=self.session_start_time, id="packet_table_widget")
             
             with TabPane("Topic Monitor", id="topic_tab"):
                 yield Input(placeholder="Enter topic name (e.g., meshtastic.receive)", id="topic_input")
@@ -341,7 +360,7 @@ class MeshtasticTUI(App):
                 with Horizontal():
                     # Left side - Message area placeholder
                     with VerticalScroll(id="message_area"):
-                        yield Static("Placeholder for message area", id="message_placeholder")
+                        yield PacketTable(id="packet_table_vox")
                       # Right side - Recording controls
                     with Vertical(id="recording_controls"):
                         with Vertical(id="recording_control_area"):
@@ -376,9 +395,10 @@ class MeshtasticTUI(App):
     
     def on_mount(self) -> None:
         """Called when app starts."""
-        table = self.query_one("#packet_table", DataTable)
+        table = self.query_one("#packet_table_widget", PacketTable)
         table.add_columns("Time", "From", "To", "Port", "Payload", "Hops", "Priority", "Telemetry", "Position", "Notes")
-        table.cursor_type = "row"
+        vox_table = self.query_one("#packet_table_vox", PacketTable)
+        vox_table.add_columns("Time", "From", "To")
         
         # Load all packets from database on startup
         load_packets_from_database()
@@ -403,15 +423,20 @@ class MeshtasticTUI(App):
     
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button presses."""
+        tabbed_content = self.query_one(TabbedContent)
+        active_tab = tabbed_content.active_pane
+        if not active_tab:
+            return  # No active tab, nothing to do
+
         if event.button.id == "all_button":
             self.session_filter_active = False
             event.button.variant = "primary"
-            self.query_one("#session_button", Button).variant = "default"
+            active_tab.query_one("#session_button", Button).variant = "default"
             self.update_table()
         elif event.button.id == "session_button":
             self.session_filter_active = True
             event.button.variant = "primary"
-            self.query_one("#all_button", Button).variant = "default"
+            active_tab.query_one("#all_button", Button).variant = "default"
             self.update_table()
         elif event.button.id == "name_toggle_button":
             self.show_long_names = not self.show_long_names
@@ -526,6 +551,7 @@ class MeshtasticTUI(App):
           # Clear existing rows
         rows = []
         
+        # TODO: refactor this into the mt_backend
         # Filter packets based on filter text
         filtered_packets = []
         if self.filter_text:
@@ -1034,11 +1060,13 @@ class MeshtasticTUI(App):
             # Update button states - disable preview since we don't have encoded data anymore
             preview_button = self.query_one("#preview_button", Button)
             preview_button.disabled = True
-            
-            # Reset encode button to original state
+              # Reset encode button to original state
             encode_button = self.query_one("#encode_button", Button)
             encode_button.variant = "default"
             encode_button.label = "Encode"
+            
+            # Reset compression stats since codec changed
+            self.reset_compression_stats()
             
         except Exception as e:
             self.log(f"Failed to change codec to {codec_type}: {e}")

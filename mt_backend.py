@@ -339,6 +339,20 @@ def load_packets_from_database():
         print(f"Error loading packets from database: {e}")
         return 0
 
+def query_packets(limit=100, portnum=None, from_id=None, to_id=None):
+    """Get packets from the global packet list with optional filters"""
+    with packet_list_lock:
+        filtered_packets = packet_list
+        
+        if portnum:
+            filtered_packets = [p for p in filtered_packets if p['portnum'] == portnum]
+        if from_id:
+            filtered_packets = [p for p in filtered_packets if p['fromId'] == from_id]
+        if to_id:
+            filtered_packets = [p for p in filtered_packets if p['toId'] == to_id]
+        
+        return filtered_packets[-limit:]  # Return the last 'limit' packets
+
 def remove_key_recursive(data, key_to_remove):
     """Recursively remove a key from a dictionary or list of dictionaries."""
     if isinstance(data, dict):
