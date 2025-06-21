@@ -15,6 +15,29 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+def play(audio_data: bytes, sample_rate: int = 44100):
+    """
+    Play audio data using PyAudio.
+    
+    Args:
+        audio_data: Raw audio bytes to play
+        sample_rate: Sample rate of the audio data (default is 44100Hz)
+    """
+    audio = pyaudio.PyAudio()
+    
+    try:
+        stream = audio.open(format=pyaudio.paInt16,
+                            channels=1,
+                            rate=sample_rate,
+                            output=True)
+        stream.write(audio_data)
+    except Exception as e:
+        logger.error(f"Error playing audio: {e}")
+    finally:
+        stream.stop_stream()
+        stream.close()
+        audio.terminate()
+
 class AudioEncoder:
 
     @classmethod
