@@ -184,11 +184,22 @@ class MeshtasticTUI(App):
         scrollbar-size-vertical: 1;
         scrollbar-size-horizontal: 1;
     }
-    
+
     #recording_controls {
         width: 30%;
         padding: 1;
         border: solid white;
+    }
+    
+    #recording_control_area {
+        height: 35%;
+        padding: 0;
+        border-bottom: solid white;
+    }
+
+    #encode_control_area {
+        height: 65%;
+        padding: 0;
     }
     
     #message_area {
@@ -196,8 +207,12 @@ class MeshtasticTUI(App):
         padding: 1;
         border: solid white;
     }
-    
+
     #record_controls {
+        margin: 1 0;
+    }
+
+    #encode_controls {
         margin: 1 0;
     }
     
@@ -327,26 +342,35 @@ class MeshtasticTUI(App):
                     # Left side - Message area placeholder
                     with VerticalScroll(id="message_area"):
                         yield Static("Placeholder for message area", id="message_placeholder")
-                    
-                    # Right side - Recording controls
+                      # Right side - Recording controls
                     with Vertical(id="recording_controls"):
-                        yield Label("Input Device:")
-                        yield Select([], id="input_device_select")
-                        yield Label("Output Device:")
-                        yield Select([], id="output_device_select")
-                        with Horizontal(id="record_controls"):
-                            yield Button("Record", id="record_button", variant="primary")
-                            yield Button("Play", id="play_button", disabled=True)
-                            yield Button("Reset", id="reset_button", disabled=True)
-                        
-                        yield Label("Recording time: 00:00", id="recording_time_label")
-                        
-                        # Gap between recording and encoding controls
-                        yield Label("")
-                        
-                        with Horizontal(id="encode_controls"):
-                            yield Button("Encode", id="encode_button", disabled=True)
-                            yield Button("Preview", id="preview_button", disabled=True)
+                        with Vertical(id="recording_control_area"):
+                            yield Label("Input Device:")
+                            yield Select([], id="input_device_select")
+                            yield Label("Output Device:")
+                            yield Select([], id="output_device_select")
+                            with Horizontal(id="record_controls"):
+                                yield Button("Record", id="record_button", variant="primary")
+                                yield Button("Play", id="play_button", disabled=True)
+                                yield Button("Reset", id="reset_button", disabled=True)
+                            
+                            yield Label("Recording time: 00:00", id="recording_time_label")
+                          # Horizontal separator between recording and encoding controls
+                        # yield Static("─" * 30, id="separator")
+                        with Vertical(id="encode_control_area"):
+                            yield Label("Codec:")
+                            yield Select([("12.5 Hz", "12_5hz"), ("25 Hz", "25hz"), ("50 Hz", "50hz")], 
+                                    value="12_5hz", id="codec_select", allow_blank=False)
+                            
+                            with Horizontal(id="encode_controls"):
+                                yield Button("Encode", id="encode_button", disabled=True)
+                                yield Button("Preview", id="preview_button", disabled=True)
+                            
+                            # Compression statistics display
+                            yield Label("Compression Stats:", id="stats_header")
+                            yield Label("Original size: -- bytes", id="original_size_label")
+                            yield Label("Compressed size: -- bytes", id="compressed_size_label")
+                            yield Label("Compression ratio: --", id="compression_ratio_label")
         
         yield Footer()
     
@@ -362,12 +386,14 @@ class MeshtasticTUI(App):
         self.set_interval(2.0, self.update_table)
           # Populate audio devices for Vox Msg tab
         self.populate_audio_devices()
-        
-        # Initialize codec for audio encoding
+          # Initialize codec for audio encoding
         try:
             import codec
-            self.codec = codec.AudioCodec("12_5hz")
-            self.log("Audio codec initialized successfully")
+            # Get initial codec type from dropdown (defaults to 12_5hz)
+            codec_select = self.query_one("#codec_select", Select)
+            codec_type = codec_select.value or "12_5hz"
+            self.codec = codec.AudioCodec(codec_type)
+            self.log(f"Audio codec initialized successfully ({codec_type})")
         except Exception as e:
             self.log(f"Failed to initialize codec: {e}")
             self.codec = None
@@ -426,6 +452,11 @@ class MeshtasticTUI(App):
               # Set a new timer to delay the filter update
             self.filter_debounce_timer = threading.Timer(0.3, self._delayed_update_table)
             self.filter_debounce_timer.start()
+    
+    def on_select_changed(self, event: Select.Changed) -> None:
+        """Called when a select dropdown value changes."""
+        if event.select.id == "codec_select":
+            self.change_codec(event.value)
     
     def _delayed_update_table(self) -> None:
         """Safely update table from timer thread."""
@@ -894,8 +925,7 @@ class MeshtasticTUI(App):
         # Stop timer
         if self.recording_timer:
             self.recording_timer.stop()
-            self.recording_timer = None
-          # Reset state
+            self.recording_timer = None          # Reset state
         self.recording_start_time = None
         self.accumulated_time = 0.0  # Reset accumulated time
         self.is_paused = False
@@ -903,7 +933,11 @@ class MeshtasticTUI(App):
         play_button.label = "Play"
         encode_button.disabled = True  # Disable encoding until new recording
         encode_button.variant = "default"
+        encode_button.label = "Encode"
         preview_button.disabled = True  # Disable preview until encoding
+        
+        # Reset compression stats
+        self.reset_compression_stats()
         
         self.log("Recording reset")
 
@@ -981,6 +1015,35 @@ class MeshtasticTUI(App):
             play_button.disabled = False
             play_button.label = "Play"
     
+    def change_codec(self, codec_type: str) -> None:
+        """Change the codec type and reinitialize it."""
+        try:
+            # Free the existing codec if it exists
+            if self.codec and hasattr(self.codec, 'free'):
+                self.codec.free()
+            
+            # Import and initialize the new codec
+            import codec
+            self.codec = codec.AudioCodec(codec_type)
+            self.log(f"Codec changed to {codec_type}")
+            
+            # Reset any encoded audio since we changed the codec
+            self.encoded_audio_data = None
+            self.encoded_metadata = None
+            
+            # Update button states - disable preview since we don't have encoded data anymore
+            preview_button = self.query_one("#preview_button", Button)
+            preview_button.disabled = True
+            
+            # Reset encode button to original state
+            encode_button = self.query_one("#encode_button", Button)
+            encode_button.variant = "default"
+            encode_button.label = "Encode"
+            
+        except Exception as e:
+            self.log(f"Failed to change codec to {codec_type}: {e}")
+            self.codec = None
+    
     def encode_audio(self) -> None:
         """Encode the recorded audio using the codec."""
         if not self.last_recorded_audio:
@@ -1021,16 +1084,54 @@ class MeshtasticTUI(App):
             encode_button = self.query_one("#encode_button", Button)
             encode_button.variant = "success"
             encode_button.label = "Encoded"
-            
-            # Log compression stats
+              # Log compression stats
             original_size = len(self.last_recorded_audio)
             compressed_size = len(encoded_data)
             compression_ratio = original_size / compressed_size if compressed_size > 0 else 0
             
             self.log(f"Audio encoded: {original_size} → {compressed_size} bytes (ratio: 1:{compression_ratio:.0f})")
             
+            # Update compression stats in GUI
+            self.update_compression_stats(original_size, compressed_size, compression_ratio)
+            
         except Exception as e:
             self.log(f"Encoding failed: {e}")
+    
+    def update_compression_stats(self, original_size: int, compressed_size: int, compression_ratio: float) -> None:
+        """Update the compression statistics display in the GUI."""
+        try:
+            # Update the labels with compression statistics
+            original_label = self.query_one("#original_size_label", Label)
+            compressed_label = self.query_one("#compressed_size_label", Label)
+            ratio_label = self.query_one("#compression_ratio_label", Label)
+            
+            # Format file sizes in a human-readable format
+            def format_bytes(bytes_val):
+                if bytes_val >= 1024:
+                    return f"{bytes_val / 1024:.1f} KB"
+                else:
+                    return f"{bytes_val} bytes"
+            
+            original_label.update(f"Original size: {format_bytes(original_size)}")
+            compressed_label.update(f"Compressed size: {format_bytes(compressed_size)}")
+            ratio_label.update(f"Compression ratio: 1:{compression_ratio:.1f}")
+            
+        except Exception as e:
+            self.log(f"Failed to update compression stats: {e}")
+    
+    def reset_compression_stats(self) -> None:
+        """Reset the compression statistics display to default values."""
+        try:
+            original_label = self.query_one("#original_size_label", Label)
+            compressed_label = self.query_one("#compressed_size_label", Label)
+            ratio_label = self.query_one("#compression_ratio_label", Label)
+            
+            original_label.update("Original size: -- bytes")
+            compressed_label.update("Compressed size: -- bytes")
+            ratio_label.update("Compression ratio: --")
+            
+        except Exception as e:
+            self.log(f"Failed to reset compression stats: {e}")
     
     def preview_encoded_audio(self) -> None:
         """Preview the encoded audio by decoding and playing it."""

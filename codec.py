@@ -160,6 +160,12 @@ class AudioCodec:
             logger.error(f"Failed to load FocalCodec model: {e}")
             raise
     
+    def free(self):
+        """Free resources used by the codec."""
+        if self.codec:
+            del self.codec
+            self.codec = None
+    
     @property
     def sample_rate(self) -> int:
         """Get the codec's sample rate."""
