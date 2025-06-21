@@ -3,18 +3,37 @@ Audio recording module for Meshtastic.
 Provides functionality for recording audio clips from microphone using PyAudio.
 """
 
-from ctypes import Union
 import io
 import pyaudio
 import wave
 import threading
 import time
-from typing import List, Dict, Optional, Callable
+from typing import List, Dict, Optional, Callable, Union
 import logging
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+class AudioEncoder:
+
+    @classmethod
+    def encode(cls, audio: bytes):
+        """
+        Encode audio data to a specific format.
+        This is a placeholder for actual encoding logic.
+        """
+        # For now, just return the raw audio bytes
+        return audio
+
+    @classmethod
+    def decode(cls, audio: bytes):
+        """
+        Decode audio data from a specific format.
+        This is a placeholder for actual decoding logic.
+        """
+        # For now, just return the raw audio bytes
+        return audio
 
 
 class AudioDevice:
@@ -146,16 +165,12 @@ class MicrophoneRecorder:
                 input_device_index=self.selected_device_index,
                 frames_per_buffer=self.chunk_size
             )
-            
             self.is_recording = True
-            self.audio_data = []
+            if self.record_thread is None:
+                self.record_thread = threading.Thread(target=self._record_worker, args=(callback,))
+                self.record_thread.daemon = True
+                self.record_thread.start()
             
-            # Start recording in a separate thread
-            self.record_thread = threading.Thread(target=self._record_worker, args=(callback,))
-            self.record_thread.daemon = True
-            self.record_thread.start()
-            
-            logger.info("Recording started")
             return True
             
         except Exception as e:
@@ -188,7 +203,14 @@ class MicrophoneRecorder:
         finally:
             logger.info("Recording worker thread ended")
     
-    def stop_recording(self) -> Optional[bytes]:
+    def pause_recording(self):
+        audio_data = self.stop_recording(clear_buffer=False)
+        return audio_data
+    
+    def clear_buffer(self):
+        self.audio_data.clear()
+    
+    def stop_recording(self, clear_buffer: bool = True) -> Optional[bytes]:
         """
         Stop recording and return the recorded audio data.
         
@@ -204,6 +226,7 @@ class MicrophoneRecorder:
         # Wait for recording thread to finish
         if self.record_thread:
             self.record_thread.join(timeout=2.0)
+            self.record_thread = None
             
         # Close the stream
         if self.stream:
@@ -219,6 +242,9 @@ class MicrophoneRecorder:
         if self.audio_data:
             recorded_audio = b''.join(self.audio_data)
             logger.info(f"Recording stopped. Captured {len(recorded_audio)} bytes of audio data")
+
+            if clear_buffer:
+                self.audio_data.clear()
             return recorded_audio
         else:
             logger.warning("No audio data was recorded")

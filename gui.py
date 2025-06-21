@@ -9,7 +9,7 @@ from datetime import datetime
 import threading
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
-from textual.widgets import DataTable, Input, Static, Button, Log, Footer, Label, TabbedContent, TabPane, TextArea
+from textual.widgets import DataTable, Input, Static, Button, Log, Footer, Label, TabbedContent, TabPane, TextArea, Select
 from textual.binding import Binding
 from textual.screen import ModalScreen
 from pubsub import pub
@@ -19,6 +19,7 @@ from mt_backend import (
     packet_list, packet_list_lock, load_packets_from_database,
     get_node_name, store_node_info
 )
+from audio import MicrophoneRecorder
 
 import logging
 
@@ -178,10 +179,31 @@ class MeshtasticTUI(App):
         text-align: center;
         height: 1;
     }
-    
-    DataTable {
+      DataTable {
         scrollbar-size-vertical: 1;
         scrollbar-size-horizontal: 1;
+    }
+    
+    #recording_controls {
+        width: 30%;
+        padding: 1;
+        border: solid white;
+    }
+    
+    #message_area {
+        width: 70%;
+        padding: 1;
+        border: solid white;
+    }
+    
+    #record_controls {
+        margin: 1 0;
+    }
+    
+    #recording_time_label {
+        margin: 1 0;
+        text-align: center;
+        color: green;
     }
     
     #detail_modal {
@@ -259,11 +281,16 @@ class MeshtasticTUI(App):
         self.update_timer = None
         self.current_topic = None  # Track current subscription topic
         self.topic_callback = None  # Store callback reference
-        
         self.filter_debounce_timer = None  # Timer for debouncing filter input
         self.node_name_cache = {}  # Cache for node names to improve performance
         self._last_rows = []
-        self._last_row_key = None
+        self._last_row_key = None        # Microphone recording variables
+        self.microphone_recorder = MicrophoneRecorder()
+        self.recording_start_time = None
+        self.accumulated_time = 0.0  # Total accumulated recording time
+        self.recording_timer = None
+        self.is_paused = False
+        self.last_recorded_audio = None  # Store the last recording for playback
 
     def compose(self) -> ComposeResult:
         """Create child widgets for the app."""
@@ -288,6 +315,26 @@ class MeshtasticTUI(App):
                     yield Button("Clear Log", id="clear_log_button")
                     yield Button("Show Topics", id="show_topics_button", variant="success")
                 yield TextArea("", id="topic_log", read_only=True)
+            
+            with TabPane("Vox Msg", id="vox_tab"):
+                with Horizontal():
+                    # Left side - Message area placeholder
+                    with VerticalScroll(id="message_area"):
+                        yield Static("Placeholder for message area", id="message_placeholder")
+                    
+                    # Right side - Recording controls
+                    with Vertical(id="recording_controls"):
+                        yield Label("Input Device:")
+                        yield Select([], id="input_device_select")
+                        yield Label("Output Device:")
+                        yield Select([], id="output_device_select")
+                        
+                        with Horizontal(id="record_controls"):
+                            yield Button("Record", id="record_button", variant="primary")
+                            yield Button("Play", id="play_button", disabled=True)
+                            yield Button("Reset", id="reset_button", disabled=True)
+                        
+                        yield Label("Recording time: 00:00", id="recording_time_label")
         
         yield Footer()
     
@@ -299,9 +346,12 @@ class MeshtasticTUI(App):
         
         # Load all packets from database on startup
         load_packets_from_database()
-        
-        # Start updating the table periodically
+          # Start updating the table periodically
         self.set_interval(2.0, self.update_table)
+        
+        # Populate audio devices for Vox Msg tab
+        self.populate_audio_devices()
+        
         # Focus the filter input
         self.query_one("#filter_input", Input).focus()
     
@@ -332,7 +382,14 @@ class MeshtasticTUI(App):
             self.unsubscribe_from_topic()
         elif event.button.id == "clear_log_button":
             self.clear_topic_log()
-        elif event.button.id == "show_topics_button":            self.show_available_topics()
+        elif event.button.id == "show_topics_button":
+            self.show_available_topics()
+        elif event.button.id == "record_button":
+            self.toggle_recording()
+        elif event.button.id == "reset_button":
+            self.reset_recording()
+        elif event.button.id == "play_button":
+            self.play_recording()
     
     def on_input_changed(self, event: Input.Changed) -> None:
         """Called when filter input changes."""
@@ -677,4 +734,215 @@ class MeshtasticTUI(App):
     def clear_node_name_cache(self) -> None:
         """Clear the node name cache when nodes are updated."""
         self.node_name_cache.clear()
+    
+    def populate_audio_devices(self) -> None:
+        """Populate the audio device dropdowns."""
+        try:
+            # Get input devices
+            input_devices = self.microphone_recorder.list_audio_devices()
+            input_options = [(device.name, device.index) for device in input_devices]
+            
+            # For now, use same devices for output (this could be enhanced later)
+            output_options = input_options.copy()
+            
+            # Update the Select widgets
+            input_select = self.query_one("#input_device_select", Select)
+            output_select = self.query_one("#output_device_select", Select)
+            
+            input_select.set_options(input_options)
+            output_select.set_options(output_options)
+              # Select default device if available
+            default_device = self.microphone_recorder.get_default_input_device()
+            if default_device and input_options:
+                input_select.value = default_device.index
+                # Also set output device to same default
+                output_select.value = default_device.index
+                
+        except Exception as e:
+            self.log(f"Error populating audio devices: {e}")
+    def update_recording_time(self) -> None:
+        """Update the recording time label using accumulated time."""
+        current_elapsed = 0.0
+        
+        # Add current session time if recording is active
+        if self.recording_start_time and not self.is_paused:
+            current_elapsed = time.time() - self.recording_start_time
+        
+        total_time = self.accumulated_time + current_elapsed
+        minutes = int(total_time // 60)
+        seconds = int(total_time % 60)
+        time_str = f"Recording time: {minutes:02d}:{seconds:02d}"
+        
+        try:
+            time_label = self.query_one("#recording_time_label", Label)
+            time_label.update(time_str)
+        except Exception:
+            pass  # Label might not exist yet    
+
+    def toggle_recording(self) -> None:
+        """Toggle recording pause/resume (record button behavior)."""
+        record_button = self.query_one("#record_button", Button)
+        reset_button = self.query_one("#reset_button", Button)
+        play_button = self.query_one("#play_button", Button)
+        
+        if not self.microphone_recorder.is_recording and not self.is_paused:
+            # Start recording for the first time
+            input_select = self.query_one("#input_device_select", Select)
+            if input_select.value is not None:
+                self.microphone_recorder.select_device(input_select.value)
+            
+            if self.microphone_recorder.start_recording():
+                # Start new recording session
+                self.recording_start_time = time.time()
+                self.is_paused = False
+                
+                # Update UI
+                record_button.label = "Pause"
+                record_button.variant = "warning"
+                reset_button.disabled = False
+                play_button.disabled = True  # Disable play while actively recording
+                
+                # Start timer to update recording time
+                self.recording_timer = self.set_interval(1.0, self.update_recording_time)
+                
+                self.log("Recording started")
+            else:
+                self.log("Failed to start recording")
+                
+        elif self.microphone_recorder.is_recording and not self.is_paused:
+            # Pause recording - accumulate time and enable play button
+            if self.recording_start_time:
+                self.accumulated_time += time.time() - self.recording_start_time
+                self.recording_start_time = None
+            
+            self.is_paused = True
+            record_button.label = "Resume"
+            record_button.variant = "success"
+            play_button.disabled = False  # Enable play when paused
+            
+            # Stop timer
+            if self.recording_timer:
+                self.recording_timer.stop()
+                self.recording_timer = None
+                
+            self.log("Recording paused")
+            audio_data = self.microphone_recorder.pause_recording()
+            if audio_data:
+                self.last_recorded_audio = audio_data
+            
+        elif self.is_paused:
+            # Resume recording - restart timing
+            self.recording_start_time = time.time()
+            self.is_paused = False
+            record_button.label = "Pause"
+            record_button.variant = "warning"
+            play_button.disabled = True  # Disable play while actively recording
+            
+            # Restart timer
+            self.recording_timer = self.set_interval(1.0, self.update_recording_time)
+            
+            self.log("Recording resumed")
+            self.microphone_recorder.start_recording()
+
+    def reset_recording(self) -> None:
+        """Stop and reset the recording completely."""
+        record_button = self.query_one("#record_button", Button)
+        reset_button = self.query_one("#reset_button", Button)
+        play_button = self.query_one("#play_button", Button)
+        time_label = self.query_one("#recording_time_label", Label)
+        
+        # Stop recording if active
+        if self.microphone_recorder.is_recording:
+            self.microphone_recorder.stop_recording()
+        else:
+            self.microphone_recorder.clear_buffer()
+        
+        # Reset all UI elements
+        record_button.label = "Record"
+        record_button.variant = "primary"
+        reset_button.disabled = True
+        time_label.update("Recording time: 00:00")
+        
+        # Stop timer
+        if self.recording_timer:
+            self.recording_timer.stop()
+            self.recording_timer = None
+          # Reset state
+        self.recording_start_time = None
+        self.accumulated_time = 0.0  # Reset accumulated time
+        self.is_paused = False
+        self.last_recorded_audio = None
+        play_button.label = "Play"
+        
+        self.log("Recording reset")
+    
+    def play_recording(self) -> None:
+        """Play the last recorded audio."""
+        if not self.last_recorded_audio:
+            self.log("No recording available to play")
+            return
+            
+        play_button = self.query_one("#play_button", Button)
+        
+        try:
+            # Create a temporary wave file in memory to play
+            import io
+            import wave
+            import threading
+            
+            # Create a BytesIO buffer and write WAV data
+            audio_buffer = io.BytesIO()
+            with wave.open(audio_buffer, 'wb') as wav_file:
+                wav_file.setnchannels(self.microphone_recorder.channels)
+                wav_file.setsampwidth(self.microphone_recorder.audio.get_sample_size(self.microphone_recorder.format))
+                wav_file.setframerate(self.microphone_recorder.sample_rate)
+                wav_file.writeframes(self.last_recorded_audio)
+            
+            audio_buffer.seek(0)
+            
+            # Play audio in a separate thread
+            def play_audio():
+                try:
+                    # Disable the play button during playback
+                    self.call_from_thread(lambda: setattr(play_button, "disabled", True))
+                    self.call_from_thread(lambda: setattr(play_button, "label", "Playing..."))
+                    
+                    # Open output stream
+                    output_stream = self.microphone_recorder.audio.open(
+                        format=self.microphone_recorder.format,
+                        channels=self.microphone_recorder.channels,
+                        rate=self.microphone_recorder.sample_rate,
+                        output=True
+                    )
+                    
+                    # Play the audio data
+                    chunk_size = self.microphone_recorder.chunk_size
+                    audio_data = self.last_recorded_audio
+                    
+                    for i in range(0, len(audio_data), chunk_size):
+                        chunk = audio_data[i:i + chunk_size]
+                        output_stream.write(chunk)
+                    
+                    output_stream.stop_stream()
+                    output_stream.close()
+                    
+                    self.call_from_thread(lambda: self.log("Playback completed"))
+                    
+                except Exception as e:
+                    self.call_from_thread(lambda: self.log(f"Error during playback: {e}"))
+                finally:
+                    # Re-enable the play button
+                    self.call_from_thread(lambda: setattr(play_button, "disabled", False))
+                    self.call_from_thread(lambda: setattr(play_button, "label", "Play"))
+            
+            # Start playback in separate thread
+            playback_thread = threading.Thread(target=play_audio, daemon=True)
+            playback_thread.start()
+            
+            self.log("Starting playback...")
+            
+        except Exception as e:
+            self.log(f"Error starting playback: {e}")
+            play_button.disabled = False
+            play_button.label = "Play"
 
