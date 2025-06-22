@@ -420,6 +420,23 @@ class MeshtasticTUI(App):
         
         # Focus the filter input
         self.query_one("#filter_input", Input).focus()
+
+    def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        self._update_hex_id()
+
+    def _update_hex_id(self):
+        tabbed_content = self.query_one(TabbedContent)
+        active_tab = tabbed_content.active_pane
+        if not active_tab:
+            return  # No active tab, nothing to do
+        name_btn = active_tab.query_one("#name_toggle_button", Button)
+        if name_btn:
+            if self.show_long_names:
+                name_btn.label = "Long Names"
+                name_btn.variant = "primary"
+            else:
+                name_btn.label = "Hex IDs"
+                name_btn.variant = "default"
     
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button presses."""
@@ -440,12 +457,7 @@ class MeshtasticTUI(App):
             self.update_table()
         elif event.button.id == "name_toggle_button":
             self.show_long_names = not self.show_long_names
-            if self.show_long_names:
-                event.button.label = "Long Names"
-                event.button.variant = "primary"
-            else:
-                event.button.label = "Hex IDs"
-                event.button.variant = "default"
+            self._update_hex_id()
             self.update_table()
         elif event.button.id == "subscribe_button":
             self.subscribe_to_topic()
