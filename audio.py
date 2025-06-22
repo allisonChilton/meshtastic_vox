@@ -94,7 +94,7 @@ class MicrophoneRecorder:
         devices = []
         device_count = self.audio.get_device_count()
         
-        logger.info(f"Found {device_count} audio devices:")
+        logger.debug(f"Found {device_count} audio devices:")
         
         for i in range(device_count):
             try:
@@ -109,7 +109,7 @@ class MicrophoneRecorder:
                         default_sample_rate=device_info['defaultSampleRate']
                     )
                     devices.append(device)
-                    logger.info(f"  {device}")
+                    logger.debug(f"  {device}")
                     
             except Exception as e:
                 logger.error(f"Error getting info for device {i}: {e}")
@@ -145,10 +145,10 @@ class MicrophoneRecorder:
             # Update sample rate to match device default if needed
             device_sample_rate = int(device_info['defaultSampleRate'])
             if device_sample_rate != self.sample_rate:
-                logger.info(f"Updating sample rate from {self.sample_rate} to {device_sample_rate}")
+                logger.debug(f"Updating sample rate from {self.sample_rate} to {device_sample_rate}")
                 self.sample_rate = device_sample_rate
                 
-            logger.info(f"Selected audio device: {device_info['name']}")
+            logger.debug(f"Selected audio device: {device_info['name']}")
             return True
             
         except Exception as e:
@@ -224,7 +224,7 @@ class MicrophoneRecorder:
         except Exception as e:
             logger.error(f"Error in recording worker: {e}")
         finally:
-            logger.info("Recording worker thread ended")
+            logger.debug("Recording worker thread ended")
     
     def pause_recording(self):
         audio_data = self.stop_recording(clear_buffer=False)
@@ -264,7 +264,7 @@ class MicrophoneRecorder:
         # Combine all audio chunks
         if self.audio_data:
             recorded_audio = b''.join(self.audio_data)
-            logger.info(f"Recording stopped. Captured {len(recorded_audio)} bytes of audio data")
+            logger.debug(f"Recording stopped. Captured {len(recorded_audio)} bytes of audio data")
 
             if clear_buffer:
                 self.audio_data.clear()
@@ -300,7 +300,7 @@ class MicrophoneRecorder:
                 wav_file.setframerate(self.sample_rate)
                 wav_file.writeframes(audio_data)
                 
-            logger.info(f"Audio saved to {filename}")
+            logger.debug(f"Audio saved to {filename}")
             return True
             
         except Exception as e:
@@ -326,7 +326,7 @@ class MicrophoneRecorder:
             
         try:
             self.audio.terminate()
-            logger.info("PyAudio terminated")
+            logger.debug("PyAudio terminated")
         except Exception as e:
             logger.error(f"Error terminating PyAudio: {e}")
 

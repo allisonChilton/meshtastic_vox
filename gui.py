@@ -17,7 +17,7 @@ from pubsub import pub
 
 # Import database and packet functions from the main module
 from mt_backend import (
-    packet_list, packet_list_lock, load_packets_from_database,
+    NodeInfo, packet_list, packet_list_lock, load_packets_from_database,
     get_node_name, store_node_info
 )
 from audio import MicrophoneRecorder
@@ -210,21 +210,40 @@ class MeshtasticTUI(App):
         scrollbar-size-horizontal: 1;
     }
 
-    #recording_controls {
+    #vox_controls {
         width: 30%;
+        padding: 0;
+    }
+
+    #recording_controls {
+        height: 70%;
         padding: 1;
         border: solid white;
     }
     
     #recording_control_area {
-        height: 35%;
         padding: 0;
         border-bottom: solid white;
     }
 
     #encode_control_area {
-        height: 65%;
         padding: 0;
+    }
+    
+    #message_sending_area {
+        height: 30%;
+        border: solid white;
+        padding: 1;
+    }
+    
+    #destination_select {
+        width: 70%;
+        margin-left: 1;
+    }
+    
+    #send_button {
+        width: 100%;
+        margin-top: 1;
     }
     
     #message_area {
@@ -341,7 +360,7 @@ class MeshtasticTUI(App):
 
     def compose(self) -> ComposeResult:
         """Create child widgets for the app."""
-        yield Static("Meshtastic Packet Monitor", classes="header", id="header")
+        # yield Static("Meshtastic Packet Monitor", classes="header", id="header")
         
         with TabbedContent():
             with TabPane("Packets", id="packets_tab"):
@@ -362,34 +381,41 @@ class MeshtasticTUI(App):
                     with VerticalScroll(id="message_area"):
                         yield PacketTable(id="packet_table_vox")
                       # Right side - Recording controls
-                    with Vertical(id="recording_controls"):
-                        with Vertical(id="recording_control_area"):
-                            yield Label("Input Device:")
-                            yield Select([], id="input_device_select")
-                            yield Label("Output Device:")
-                            yield Select([], id="output_device_select")
-                            with Horizontal(id="record_controls"):
-                                yield Button("Record", id="record_button", variant="primary")
-                                yield Button("Play", id="play_button", disabled=True)
-                                yield Button("Reset", id="reset_button", disabled=True)
-                            
-                            yield Label("Recording time: 00:00", id="recording_time_label")
-                          # Horizontal separator between recording and encoding controls
-                        # yield Static("─" * 30, id="separator")
-                        with Vertical(id="encode_control_area"):
-                            yield Label("Codec:")
-                            yield Select([("12.5 Hz", "12_5hz"), ("25 Hz", "25hz"), ("50 Hz", "50hz")], 
-                                    value="12_5hz", id="codec_select", allow_blank=False)
-                            
-                            with Horizontal(id="encode_controls"):
-                                yield Button("Encode", id="encode_button", disabled=True)
-                                yield Button("Preview", id="preview_button", disabled=True)
-                            
-                            # Compression statistics display
-                            yield Label("Compression Stats:", id="stats_header")
-                            yield Label("Original size: -- bytes", id="original_size_label")
-                            yield Label("Compressed size: -- bytes", id="compressed_size_label")
-                            yield Label("Compression ratio: --", id="compression_ratio_label")
+                    with Vertical(id="vox_controls"):
+                        with Vertical(id="recording_controls"):
+                            with Vertical(id="recording_control_area"):
+                                yield Label("Input Device:")
+                                yield Select([], id="input_device_select")
+                                yield Label("Output Device:")
+                                yield Select([], id="output_device_select")
+                                with Horizontal(id="record_controls"):
+                                    yield Button("Record", id="record_button", variant="primary")
+                                    yield Button("Play", id="play_button", disabled=True)
+                                    yield Button("Reset", id="reset_button", disabled=True)
+                                
+                                yield Label("Recording time: 00:00", id="recording_time_label")
+                            # Horizontal separator between recording and encoding controls
+                            with Vertical(id="encode_control_area"):
+                                yield Label("Codec:")
+                                yield Select([("12.5 Hz", "12_5hz"), ("25 Hz", "25hz"), ("50 Hz", "50hz")], 
+                                        value="12_5hz", id="codec_select", allow_blank=False)
+                                
+                                with Horizontal(id="encode_controls"):
+                                    yield Button("Encode", id="encode_button", disabled=True)
+                                    yield Button("Preview", id="preview_button", disabled=True)
+                                # Compression statistics display
+                                yield Label("Compression Stats:", id="stats_header")
+                                yield Label("Original size: -- bytes", id="original_size_label")
+                                yield Label("Compressed size: -- bytes", id="compressed_size_label")
+                                yield Label("Compression ratio: --", id="compression_ratio_label")
+                                
+                        # Message sending area
+                        with Vertical(id="message_sending_area"):
+                            # yield Label("Message Sending:", id="message_sending_label")
+                            with Horizontal():
+                                yield Label("Destination:")
+                                yield Select([], id="destination_select")
+                            yield Button("Send", id="send_button", disabled=True)
         
         yield Footer()
     
@@ -406,6 +432,9 @@ class MeshtasticTUI(App):
         self.set_interval(2.0, self.update_table)
           # Populate audio devices for Vox Msg tab
         self.populate_audio_devices()
+        
+        # Populate destination dropdown for voice messages
+        self.populate_destination_dropdown()
           # Initialize codec for audio encoding
         try:
             import codec
@@ -429,7 +458,11 @@ class MeshtasticTUI(App):
         active_tab = tabbed_content.active_pane
         if not active_tab:
             return  # No active tab, nothing to do
-        name_btn = active_tab.query_one("#name_toggle_button", Button)
+        try:
+            name_btn = active_tab.query_one("#name_toggle_button", Button)
+        except:
+            name_btn = None
+
         if name_btn:
             if self.show_long_names:
                 name_btn.label = "Long Names"
@@ -459,6 +492,8 @@ class MeshtasticTUI(App):
             self.show_long_names = not self.show_long_names
             self._update_hex_id()
             self.update_table()
+            # Update destination dropdown when long names setting changes
+            self.populate_destination_dropdown()
         elif event.button.id == "subscribe_button":
             self.subscribe_to_topic()
         elif event.button.id == "unsubscribe_button":
@@ -477,6 +512,8 @@ class MeshtasticTUI(App):
             self.encode_audio()
         elif event.button.id == "preview_button":
             self.preview_encoded_audio()
+        elif event.button.id == "send_button":
+            self.send_voice_message()
     
     def on_input_changed(self, event: Input.Changed) -> None:
         """Called when filter input changes."""
@@ -853,25 +890,66 @@ class MeshtasticTUI(App):
                 
         except Exception as e:
             self.log(f"Error populating audio devices: {e}")
-    def update_recording_time(self) -> None:
-        """Update the recording time label using accumulated time."""
-        current_elapsed = 0.0
-        
-        # Add current session time if recording is active
-        if self.recording_start_time and not self.is_paused:
-            current_elapsed = time.time() - self.recording_start_time
-        
-        total_time = self.accumulated_time + current_elapsed
-        minutes = int(total_time // 60)
-        seconds = int(total_time % 60)
-        time_str = f"Recording time: {minutes:02d}:{seconds:02d}"
-        
+    
+    def populate_destination_dropdown(self) -> None:
+        """Populate the destination dropdown with known nodes."""
         try:
-            time_label = self.query_one("#recording_time_label", Label)
-            time_label.update(time_str)
-        except Exception:
-            pass  # Label might not exist yet    
+            destination_select = self.query_one("#destination_select", Select)
+            
+            # Get all known nodes from the backend
+            from mt_backend import get_all_nodes
+            
+            # Try to get nodes, but handle if function doesn't exist yet
+            try:
+                nodes: List[NodeInfo] = get_all_nodes()
+            except (AttributeError, ImportError):
+                # Fallback to empty nodes dict if function not available
+                nodes = []
+            
+            # Create options for the dropdown
+            options = []
+            for node_info in nodes:
+                if self.show_long_names:
+                    display_name = node_info.long_name if hasattr(node_info, "long_name") else str(node_info.node_id)
+                else:
+                    display_name = node_info.node_id
+                if display_name: # omit empty names
+                    options.append((display_name, node_info.node_id))
 
+            # Sort options by display name (case-insensitive)
+            options.sort(key=lambda x: x[0].lower())
+            
+            # Add broadcast option
+            options.insert(0, ("Broadcast", "^all"))
+            
+            # Update the select widget
+            destination_select.set_options(options)
+            
+        except Exception as e:
+            self.log(f"Error populating destination dropdown: {e}")
+    
+    def send_voice_message(self) -> None:
+        """Send the encoded voice message (stub implementation)."""
+        try:
+            destination_select = self.query_one("#destination_select", Select)
+            destination = destination_select.value
+            
+            if not destination:
+                self.log("No destination selected")
+                return
+                
+            # Check if we have encoded data
+            if not hasattr(self, 'encoded_audio_data') or not self.encoded_audio_data:
+                self.log("No encoded audio data to send")
+                return
+                
+            # TODO: Implement actual message building and sending logic
+            self.log(f"Sending voice message to {destination} (STUB - not implemented yet)")
+            self.log(f"Encoded data size: {len(self.encoded_audio_data)} bytes")
+            
+        except Exception as e:
+            self.log(f"Error sending voice message: {e}")
+    
     def toggle_recording(self) -> None:
         """Toggle recording pause/resume (record button behavior)."""
         record_button = self.query_one("#record_button", Button)
@@ -938,6 +1016,20 @@ class MeshtasticTUI(App):
             
             self.log("Recording resumed")
             self.microphone_recorder.start_recording()
+    
+    def update_recording_time(self) -> None:
+        """Update the recording time label using accumulated time."""
+        current_elapsed = 0.0
+
+        # Add current session time if recording is active
+        if self.recording_start_time and not self.is_paused:
+            current_elapsed = time.time() - self.recording_start_time
+
+        total_time = self.accumulated_time + current_elapsed
+        minutes = int(total_time // 60)
+        seconds = int(total_time % 60)
+        time_str = f"Recording time: {minutes:02d}:{seconds:02d}"
+        self.query_one("#recording_time_label", Label).update(time_str)
 
     def reset_recording(self) -> None:
         """Stop and reset the recording completely."""
@@ -1115,10 +1207,16 @@ class MeshtasticTUI(App):
             # Store the encoded data
             self.encoded_audio_data = encoded_data
             self.encoded_metadata = metadata
-            
-            # Enable preview button
+              # Enable preview button
             preview_button = self.query_one("#preview_button", Button)
             preview_button.disabled = False
+            
+            # Enable send button
+            try:
+                send_button = self.query_one("#send_button", Button)
+                send_button.disabled = False
+            except:
+                pass  # Send button might not exist in current context
             
             # Update encode button to show success
             encode_button = self.query_one("#encode_button", Button)

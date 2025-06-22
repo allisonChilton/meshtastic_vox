@@ -10,7 +10,7 @@ import meshtastic.serial_interface
 from pubsub import pub
 from pubsub.core import Topic
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, List
 import sqlite3
 import json
 from datetime import datetime
@@ -242,7 +242,19 @@ def get_node_name(node_id):
         print(f"Error getting node name: {e}")
         return node_id
 
-def get_all_nodes():
+@dataclass
+class NodeInfo:
+    node_id: str
+    long_name: str
+    short_name: str
+    hw_model: str
+    firmware_version: str
+    role: str
+    last_seen: datetime
+    battery_level: Optional[int] = None
+    voltage: Optional[float] = None
+
+def get_all_nodes() -> List[NodeInfo]:
     """Get all nodes from the database"""
     try:
         conn = sqlite3.connect('meshtastic_packets.db')
@@ -257,8 +269,23 @@ def get_all_nodes():
         
         nodes = cursor.fetchall()
         conn.close()
+
+        info_list = []
+        for node in nodes:
+            info = NodeInfo(
+                node_id=node[0],
+                long_name=node[1] or "",
+                short_name=node[2] or "",
+                hw_model=node[3] or "",
+                firmware_version=node[4] or "",
+                role=node[5] or "",
+                last_seen=datetime.fromisoformat(node[6]) if node[6] else None,
+                battery_level=node[7],
+                voltage=node[8]
+            )
+            info_list.append(info)
         
-        return nodes
+        return info_list
         
     except Exception as e:
         print(f"Error getting nodes: {e}")
@@ -415,6 +442,12 @@ class Packet:
     @classmethod
     def from_dict(cls, data):
         data = data.copy()  # Avoid modifying the original data
+        if 'raw' in data:
+            raw = data.pop("raw")
+            raw = raw.SerializeToString()
+        else:
+            raw = None
+
         if 'encrypted' not in data:
             decoded = Decoded.from_dict(data.pop("decoded", {}))
         else:
@@ -429,7 +462,7 @@ class Packet:
             hopLimit=data.get("hopLimit", 0),
             priority=data.pop("priority", ""),
             decoded=decoded,
-            raw=data.pop("raw", None),
+            raw=raw,
             packet_original=data  # Store original data for debugging
         )
 
