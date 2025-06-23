@@ -23,8 +23,9 @@ import logging
 log = logging.getLogger(__name__)
 
 # Global packet list for the TUI
-packet_list = []
+packet_list: List['Packet'] = []
 packet_list_lock = threading.Lock()
+MESHVOX_PORTNUM = meshtastic.portnums_pb2.PRIVATE_APP
 
 # Subtopics dictionary with descriptions
 subtopics = {
@@ -221,6 +222,7 @@ def store_node_info(node_id, node_info):
     except Exception as e:
         print(f"Error storing node info: {e}")
 
+@lru_cache(maxsize=1000)
 def get_node_name(node_id):
     """Get the long name for a node ID, fallback to hex ID if not found"""
     try:
@@ -345,18 +347,25 @@ def load_packets_from_database():
         with packet_list_lock:
             packet_list.clear()
             for packet in packets:
-                packet_info = {
-                    'id': packet[0],
-                    'fromId': packet[1] or 'N/A',
-                    'toId': packet[2] or 'N/A',
-                    'portnum': packet[3] or 'N/A',
-                    'payload': packet[4] or b'',
-                    'rxTime': packet[5] or 0,
-                    'hopLimit': packet[6] or 0,
-                    'priority': packet[7] or 'normal',
-                    'telemetry': json.loads(packet[8]) if packet[8] else None,
-                    'position': json.loads(packet[9]) if packet[9] else None
-                }
+                # Construct a Packet object from the database row
+                decoded = Decoded(
+                    portnum=packet[3] or 'N/A',
+                    payload=packet[4] or b'',
+                    telemetry=json.loads(packet[8]) if packet[8] else None,
+                    position=json.loads(packet[9]) if packet[9] else None
+                )
+                packet_obj = Packet(
+                    id=packet[0],
+                    from_=0,  # Database does not store numeric from_/to, set to 0 or parse if needed
+                    to=0,
+                    fromId=packet[1] or 'N/A',
+                    toId=packet[2] or 'N/A',
+                    rxTime=packet[5] or 0,
+                    hopLimit=packet[6] or 0,
+                    priority=packet[7] or 'normal',
+                    decoded=decoded
+                )
+                packet_info = packet_obj
                 packet_list.append(packet_info)
         
         print(f"Loaded {len(packets)} packets from database")
@@ -366,19 +375,24 @@ def load_packets_from_database():
         print(f"Error loading packets from database: {e}")
         return 0
 
-def query_packets(limit=100, portnum=None, from_id=None, to_id=None):
+def query_packets(limit=100, portnum=None, from_id=None, to_id=None, substring=None, exclude=False):
     """Get packets from the global packet list with optional filters"""
     with packet_list_lock:
-        filtered_packets = packet_list
+        filtered_packets = packet_list.copy()
         
-        if portnum:
-            filtered_packets = [p for p in filtered_packets if p['portnum'] == portnum]
-        if from_id:
-            filtered_packets = [p for p in filtered_packets if p['fromId'] == from_id]
-        if to_id:
-            filtered_packets = [p for p in filtered_packets if p['toId'] == to_id]
-        
-        return filtered_packets[-limit:]  # Return the last 'limit' packets
+    if portnum:
+        filtered_packets = [p for p in filtered_packets if p.decoded.portnum == portnum]
+    if from_id:
+        filtered_packets = [p for p in filtered_packets if p.fromId == from_id]
+    if to_id:
+        filtered_packets = [p for p in filtered_packets if p.toId == to_id]
+    if substring:
+        if not exclude:
+            filtered_packets = [p for p in filtered_packets if p.matches_substring(substring)]
+        else:
+            filtered_packets = [p for p in filtered_packets if not p.matches_substring(substring)]
+    
+    return filtered_packets[-limit:]  # Return the last 'limit' packets
 
 def remove_key_recursive(data, key_to_remove):
     """Recursively remove a key from a dictionary or list of dictionaries."""
@@ -438,6 +452,41 @@ class Packet:
     decoded: 'Decoded'
     raw: Optional[bytes] = None
     packet_original: Optional[Any] = None  # Store original data for debugging
+    notes: Optional[str] = None  # Additional notes for processing
+
+
+    def matches_substring(self, query: str) -> bool:
+        """
+        Check if the packet matches the given substring query.
+        Optionally provide a node_lookup function to resolve node names.
+        """
+        query = query.lower()
+        from_long_name = get_node_name(self.fromId) if get_node_name else self.fromId
+        to_long_name = get_node_name(self.toId) if get_node_name else self.toId
+        search_text = f"{self.fromId} {self.toId} {from_long_name} {to_long_name} {self.decoded.portnum} {self.decoded.payload} {self.priority} {getattr(self.decoded, 'notes', '')}".lower()
+        return query in search_text
+
+    def to_dict(self) -> dict:
+        packet_info = {
+            'id': self.id,
+            'fromId': self.fromId,
+            'toId': self.toId,
+            'portnum': self.decoded.portnum,
+            'payload': self.decoded.payload,
+            'rxTime': self.rxTime,
+            'hopLimit': self.hopLimit,
+            'priority': self.priority,
+            'payload_original': self.decoded.payload_original,
+            'packet_original': self.packet_original
+        }
+        if self.decoded:
+            u = {
+            'telemetry': self.decoded.telemetry,
+            'position': self.decoded.position,
+            }
+            packet_info.update(u)
+
+        return packet_info
 
     @classmethod
     def from_dict(cls, data):
@@ -500,44 +549,11 @@ def onReceive(packet, interface):
         if parsed_packet.decoded.notes:
             processing_notes.append(parsed_packet.decoded.notes)
         
-        # Log unknown telemetry keys for debugging (disabled)
-        if False and parsed_packet.decoded.telemetry:
-            unknown_tel_keys = set(parsed_packet.decoded.telemetry.keys()) - {
-                'batteryLevel', 'voltage', 'temperature', 'channelUtilization', 'airUtilTx'
-            }
-            if unknown_tel_keys:
-                processing_notes.append(f"Unknown telemetry: {','.join(list(unknown_tel_keys)[:2])}")
-        
-        # Log unknown position keys for debugging (disabled)
-        if False and parsed_packet.decoded.position:
-            unknown_pos_keys = set(parsed_packet.decoded.position.keys()) - {
-                'latitudeI', 'longitudeI', 'latitude', 'longitude', 'altitude', 'time'
-            }
-            if unknown_pos_keys:
-                processing_notes.append(f"Unknown position: {','.join(list(unknown_pos_keys)[:2])}")
-        
         # Add to global packet list for TUI
         with packet_list_lock:
-            packet_info = {
-                'id': parsed_packet.id,
-                'fromId': parsed_packet.fromId,
-                'toId': parsed_packet.toId,
-                'portnum': parsed_packet.decoded.portnum,
-                'payload': parsed_packet.decoded.payload,
-                'rxTime': parsed_packet.rxTime,
-                'hopLimit': parsed_packet.hopLimit,
-                'priority': parsed_packet.priority,
-                'notes': "; ".join(processing_notes) if processing_notes else "",
-                'payload_original': parsed_packet.decoded.payload_original,
-                'packet_original': parsed_packet.packet_original
-            }
-            if parsed_packet.decoded:
-                u = {
-                'telemetry': parsed_packet.decoded.telemetry,
-                'position': parsed_packet.decoded.position,
-                }
-                packet_info.update(u)
-            packet_list.append(packet_info)
+            parsed_packet.notes = "; ".join(processing_notes) if processing_notes else "",
+
+            packet_list.append(parsed_packet)
             
             # Keep only last 1000 packets in memory
             if len(packet_list) > 1000:
@@ -576,6 +592,29 @@ def recursive_topic_gather(node: Topic):
         recursive_topic_gather(topic)
     return subtopics
 
+interface = None
+
+def send_vox_message(destinationId: str, data: bytes):
+    def onAckNak(x: dict):
+        """Callback for ACK/NAK responses."""
+        print("ACK/NAK received")
+        print(x)
+
+    if interface:
+        pkt = interface.sendData(
+            data=data,
+            destinationId=destinationId,
+            wantAck=True,
+            wantResponse=False,
+            portNum=meshtastic.portnums_pb2.TEXT_MESSAGE_APP,
+            hopLimit=1,
+            pkiEncrypted=True,
+            onResponse=onAckNak
+        )
+        log.info(f"Packet sent: {pkt}")
+        # while True:
+        #     time.sleep(1)
+
 def run_meshtastic_interface():
     """Run the meshtastic interface in a separate thread."""
     try:
@@ -586,6 +625,7 @@ def run_meshtastic_interface():
         # Connect to device
         name = "Meshtastic_db60"
         addr = "48:CA:43:3C:DB:61"
+        global interface
         interface = meshtastic.serial_interface.SerialInterface('COM4')
         
         print("Meshtastic interface started...")
@@ -697,13 +737,15 @@ if __name__ == "__main__":
     meshtastic_thread = threading.Thread(target=run_meshtastic_interface, daemon=True)
     meshtastic_thread.start()
     
-    # Give the interface a moment to start
-    time.sleep(2)
+    # # Give the interface a moment to start
+    while not interface:
+        time.sleep(0.1)
     
-    # Add test packets
-    # add_test_packets()
+    # # Add test packets
+    # # add_test_packets()
     
-    # Import and run the GUI
-    from gui import MeshtasticTUI
-    app = MeshtasticTUI()
-    app.run()
+    # # Import and run the GUI
+    # from gui import MeshtasticTUI
+    # app = MeshtasticTUI()
+    # app.run()
+    send_message()

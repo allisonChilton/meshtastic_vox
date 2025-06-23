@@ -3,6 +3,7 @@ GUI components for the Meshtastic Packet Monitor.
 Contains the main TUI application and modal dialogs.
 """
 
+from dataclasses import dataclass
 import time
 import json
 from datetime import datetime
@@ -17,13 +18,27 @@ from pubsub import pub
 
 # Import database and packet functions from the main module
 from mt_backend import (
-    NodeInfo, packet_list, packet_list_lock, load_packets_from_database,
-    get_node_name, store_node_info
+    MESHVOX_PORTNUM, NodeInfo, packet_list, packet_list_lock, load_packets_from_database,
+    get_node_name, query_packets, store_node_info
 )
 from audio import MicrophoneRecorder
 
 
 import logging
+
+@dataclass
+class FormattedPacket:
+    """A data class to hold formatted packet information for display."""
+    time: str
+    from_id: str
+    to_id: str
+    portnum: str
+    payload: str
+    hop_limit: str
+    priority: str
+    telemetry: str
+    position: str
+    notes: str
 
 class PacketDetailModal(ModalScreen):
     """A modal screen to show detailed packet information."""
@@ -454,8 +469,7 @@ class MeshtasticTUI(App):
         self._update_hex_id()
 
     def _update_hex_id(self):
-        tabbed_content = self.query_one(TabbedContent)
-        active_tab = tabbed_content.active_pane
+        active_tab = self.get_active_tab()
         if not active_tab:
             return  # No active tab, nothing to do
         try:
@@ -473,8 +487,7 @@ class MeshtasticTUI(App):
     
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button presses."""
-        tabbed_content = self.query_one(TabbedContent)
-        active_tab = tabbed_content.active_pane
+        active_tab = self.get_active_tab()
         if not active_tab:
             return  # No active tab, nothing to do
 
@@ -546,7 +559,10 @@ class MeshtasticTUI(App):
             
             with packet_list_lock:
                 packets = packet_list.copy()
-              # Apply current filters to get the same filtered list as displayed
+            
+            packets = [x.to_dict() for x in packets]
+
+            # Apply current filters to get the same filtered list as displayed
             if self.session_filter_active:
                 packets = [p for p in packets if p.get('rxTime', 0) >= self.session_start_time]
             
@@ -585,14 +601,114 @@ class MeshtasticTUI(App):
                 selected_packet = display_packets[row_index]
                 # Show the detail modal
                 self.push_screen(PacketDetailModal(selected_packet))
+
+    def get_active_tab(self) -> TabPane | None:
+        """Get the currently active tab pane."""
+        tabbed_content = self.query_one(TabbedContent)
+        return tabbed_content.active_pane if tabbed_content else None
+
+    def _format_packet(self, packet: dict, show_long_names: bool) -> FormattedPacket:
+        """Format a packet dictionary into a string for display."""
+        time_str = datetime.fromtimestamp(packet.get('rxTime', 0)).strftime('%H:%M:%S') if packet.get('rxTime') else 'N/A'
+            # Handle From ID with name toggle
+        from_id = packet.get('fromId', 'N/A')
+        if show_long_names and from_id != 'N/A':
+            from_display = self.get_cached_node_name(from_id)
+        else:
+            from_display = from_id
+            
+        # Handle To ID with name toggle  
+        to_id = packet.get('toId', 'N/A')
+        if show_long_names and to_id != 'N/A':
+            to_display = self.get_cached_node_name(to_id)
+        else:
+            to_display = to_id
+            
+        portnum = packet.get('portnum', 'N/A')
+        
+        # Decode payload if it's text
+        payload = packet.get('payload', b'')
+        if isinstance(payload, bytes):
+            try:
+                payload_str = payload.decode('utf-8')[:30]  # Limit to 30 chars for more columns
+            except:
+                payload_str = f"<binary:{len(payload)} bytes>"
+        else:
+            payload_str = str(payload)[:30]
+        
+        # Get additional fields
+        hop_limit = str(packet.get('hopLimit', 'N/A'))
+        priority = packet.get('priority', 'N/A')
+        
+        # Format telemetry data
+        telemetry = packet.get('telemetry')
+        if telemetry:
+            if isinstance(telemetry, dict) and telemetry:
+                # Show key metrics from telemetry
+                tel_parts = []
+                if 'battery_level' in telemetry:
+                    tel_parts.append(f"Bat:{telemetry['battery_level']}%")
+                if 'voltage' in telemetry:
+                    tel_parts.append(f"V:{telemetry['voltage']:.1f}")
+                if 'temperature' in telemetry:
+                    tel_parts.append(f"T:{telemetry['temperature']:.1f}°C")
+                telemetry_str = " ".join(tel_parts)[:25] if tel_parts else "Yes"
+            else:
+                telemetry_str = "Yes"
+        else:
+            telemetry_str = "-"
+        
+        # Format position data
+        position = packet.get('position')
+        if position:
+            if isinstance(position, dict) and position:
+                lat = position.get('latitude_i', position.get('latitude', 0))
+                lon = position.get('longitude_i', position.get('longitude', 0))
+                if lat and lon:
+                    # Convert from scaled integers if needed
+                    if abs(lat) > 1000000:  # Likely scaled integer
+                        lat = lat / 1e7
+                        lon = lon / 1e7
+                    position_str = f"{lat:.3f},{lon:.3f}"
+                else:
+                    position_str = "Yes"
+            else:
+                position_str = "Yes"
+        else:
+            position_str = "-"
+        
+        # Generate notes based on packet processing
+        notes = packet.get('notes', '')
+
+        formatted_packet = FormattedPacket(
+            time=time_str,
+            from_id=from_display,
+            to_id=to_display,
+            portnum=portnum,
+            payload=payload_str,
+            hop_limit=hop_limit,
+            priority=priority,
+            telemetry=telemetry_str,
+            position=position_str,
+            notes=notes
+        )
+
+        return formatted_packet
+
     
     def update_table(self) -> None:
         """Update the packet table with filtered data."""
-        table = self.query_one("#packet_table", DataTable)
-        stats = self.query_one("#stats", Static)
+        active_tab = self.get_active_tab()
+        try:
+            table = active_tab.query_one("#packet_table", DataTable)
+        except:
+            return # no packet table in this tab
+        stats = active_tab.query_one("#stats", Static)
         
         with packet_list_lock:
             packets = packet_list.copy()
+
+        packets = [x.to_dict() for x in packets]
         
         # Apply session filter if active
         if self.session_filter_active:
@@ -600,112 +716,20 @@ class MeshtasticTUI(App):
           # Clear existing rows
         rows = []
         
-        # TODO: refactor this into the mt_backend
         # Filter packets based on filter text
-        filtered_packets = []
-        if self.filter_text:
-            for packet in packets:
-                # Get node names for from and to IDs using cache
-                from_id = packet.get('fromId', '')
-                to_id = packet.get('toId', '')
-                from_long_name = self.get_cached_node_name(from_id) if from_id else ''
-                to_long_name = self.get_cached_node_name(to_id) if to_id else ''
-                
-                # Search in various fields including new columns and long names
-                search_text = f"{from_id} {to_id} {from_long_name} {to_long_name} {packet.get('portnum', '')} {packet.get('payload', '')} {packet.get('priority', '')} {packet.get('notes', '')}".lower()
-                # Also search in telemetry and position data
-                if packet.get('telemetry'):
-                    search_text += f" {str(packet['telemetry'])}".lower()
-                if packet.get('position'):
-                    search_text += f" {str(packet['position'])}".lower()
-                
-                # Check if this is an exclusion filter (starts with !)
-                if self.filter_text.startswith('!'):
-                    # Exclude packets that contain the substring after the !
-                    exclude_text = self.filter_text[1:]  # Remove the ! prefix
-                    if exclude_text and exclude_text not in search_text:
-                        filtered_packets.append(packet)
-                else:
-                    # Normal inclusion filter
-                    if self.filter_text in search_text:
-                        filtered_packets.append(packet)
-        else:
-            filtered_packets = packets
+        exclude = self.filter_text.startswith('!')
+        portnum = MESHVOX_PORTNUM if active_tab.id == "vox_tab" else None
+        filtered_packets = query_packets(limit=100, substring=self.filter_text, exclude=exclude, portnum=portnum)
+        filtered_packets = [p.to_dict() for p in filtered_packets]
         
         # Add filtered packets to table (show most recent first)
         for packet in reversed(filtered_packets[-100:]):  # Show last 100 packets
-            time_str = datetime.fromtimestamp(packet.get('rxTime', 0)).strftime('%H:%M:%S') if packet.get('rxTime') else 'N/A'
-              # Handle From ID with name toggle
-            from_id = packet.get('fromId', 'N/A')
-            if self.show_long_names and from_id != 'N/A':
-                from_display = self.get_cached_node_name(from_id)
+            formatted_packet = self._format_packet(packet, self.show_long_names)            
+            if active_tab.id == "vox_tab":
+                # For Vox Msg tab, only show basic info
+                rows.append((formatted_packet.time, formatted_packet.from_id, formatted_packet.to_id))
             else:
-                from_display = from_id
-                
-            # Handle To ID with name toggle  
-            to_id = packet.get('toId', 'N/A')
-            if self.show_long_names and to_id != 'N/A':
-                to_display = self.get_cached_node_name(to_id)
-            else:
-                to_display = to_id
-                
-            portnum = packet.get('portnum', 'N/A')
-            
-            # Decode payload if it's text
-            payload = packet.get('payload', b'')
-            if isinstance(payload, bytes):
-                try:
-                    payload_str = payload.decode('utf-8')[:30]  # Limit to 30 chars for more columns
-                except:
-                    payload_str = f"<binary:{len(payload)} bytes>"
-            else:
-                payload_str = str(payload)[:30]
-            
-            # Get additional fields
-            hop_limit = str(packet.get('hopLimit', 'N/A'))
-            priority = packet.get('priority', 'N/A')
-            
-            # Format telemetry data
-            telemetry = packet.get('telemetry')
-            if telemetry:
-                if isinstance(telemetry, dict) and telemetry:
-                    # Show key metrics from telemetry
-                    tel_parts = []
-                    if 'battery_level' in telemetry:
-                        tel_parts.append(f"Bat:{telemetry['battery_level']}%")
-                    if 'voltage' in telemetry:
-                        tel_parts.append(f"V:{telemetry['voltage']:.1f}")
-                    if 'temperature' in telemetry:
-                        tel_parts.append(f"T:{telemetry['temperature']:.1f}°C")
-                    telemetry_str = " ".join(tel_parts)[:25] if tel_parts else "Yes"
-                else:
-                    telemetry_str = "Yes"
-            else:
-                telemetry_str = "-"
-            
-            # Format position data
-            position = packet.get('position')
-            if position:
-                if isinstance(position, dict) and position:
-                    lat = position.get('latitude_i', position.get('latitude', 0))
-                    lon = position.get('longitude_i', position.get('longitude', 0))
-                    if lat and lon:
-                        # Convert from scaled integers if needed
-                        if abs(lat) > 1000000:  # Likely scaled integer
-                            lat = lat / 1e7
-                            lon = lon / 1e7
-                        position_str = f"{lat:.3f},{lon:.3f}"
-                    else:
-                        position_str = "Yes"
-                else:
-                    position_str = "Yes"
-            else:
-                position_str = "-"
-            
-            # Generate notes based on packet processing
-            notes = packet.get('notes', '')
-            
-            rows.append((time_str, from_display, to_display, portnum, payload_str, hop_limit, priority, telemetry_str, position_str, notes))
+                rows.append(( formatted_packet.time, formatted_packet.from_id, formatted_packet.to_id, formatted_packet.portnum, formatted_packet.payload, formatted_packet.hop_limit, formatted_packet.priority, formatted_packet.telemetry, formatted_packet.position, formatted_packet.notes))
         
         if tuple(self._last_rows) == tuple(rows):
             return 
