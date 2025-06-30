@@ -711,15 +711,16 @@ class MeshtasticTUI(App):
         packets = [x.to_dict() for x in packets]
         
         # Apply session filter if active
-        if self.session_filter_active:
-            packets = [p for p in packets if p.get('rxTime', 0) >= self.session_start_time]
+        # if self.session_filter_active:
+        #     packets = [p for p in packets if p.get('rxTime', 0) >= self.session_start_time]
+        newer_than = self.session_start_time if self.session_filter_active else None
           # Clear existing rows
         rows = []
         
         # Filter packets based on filter text
         exclude = self.filter_text.startswith('!')
         portnum = MESHVOX_PORTNUM if active_tab.id == "vox_tab" else None
-        filtered_packets = query_packets(limit=100, substring=self.filter_text, exclude=exclude, portnum=portnum)
+        filtered_packets = query_packets(limit=100, substring=self.filter_text, exclude=exclude, portnum=portnum, newer_than=newer_than)
         filtered_packets = [p.to_dict() for p in filtered_packets]
         
         # Add filtered packets to table (show most recent first)
@@ -945,15 +946,14 @@ class MeshtasticTUI(App):
             
             # Add broadcast option
             options.insert(0, ("Broadcast", "^all"))
-            
-            # Update the select widget
+              # Update the select widget
             destination_select.set_options(options)
             
         except Exception as e:
             self.log(f"Error populating destination dropdown: {e}")
     
     def send_voice_message(self) -> None:
-        """Send the encoded voice message (stub implementation)."""
+        """Send the encoded voice message using the backend."""
         try:
             destination_select = self.query_one("#destination_select", Select)
             destination = destination_select.value
@@ -966,10 +966,18 @@ class MeshtasticTUI(App):
             if not hasattr(self, 'encoded_audio_data') or not self.encoded_audio_data:
                 self.log("No encoded audio data to send")
                 return
-                
-            # TODO: Implement actual message building and sending logic
-            self.log(f"Sending voice message to {destination} (STUB - not implemented yet)")
+            
+            # Import the send function from backend
+            from mt_backend import send_vox_message
+            
+            # Send the voice message with encoded audio data
+            self.log(f"Sending voice message to {destination}")
             self.log(f"Encoded data size: {len(self.encoded_audio_data)} bytes")
+            
+            # Call the backend function to send the message
+            send_vox_message(destination, self.encoded_audio_data)
+            
+            self.log("Voice message sent successfully")
             
         except Exception as e:
             self.log(f"Error sending voice message: {e}")

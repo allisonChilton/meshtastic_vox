@@ -6,6 +6,7 @@ Contains database operations, packet processing, and Meshtastic interface.
 import meshtastic
 import time
 import meshtastic.ble_interface
+import meshtastic.node
 import meshtastic.serial_interface
 from pubsub import pub
 from pubsub.core import Topic
@@ -72,6 +73,7 @@ def init_database():
             node_id TEXT PRIMARY KEY,
             long_name TEXT,
             short_name TEXT,
+            node_int INTEGER,
             hw_model TEXT,
             firmware_version TEXT,
             role TEXT,
@@ -79,8 +81,7 @@ def init_database():
             battery_level INTEGER,
             voltage REAL,
             channel_utilization REAL,
-            air_util_tx REAL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            air_util_tx REAL,            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -88,6 +89,103 @@ def init_database():
     conn.commit()
     conn.close()
     print("Database initialized successfully")
+    
+    # Check and alter tables if needed
+    check_and_alter_tables()
+
+def check_and_alter_tables():
+    """Check if tables need to be altered to match current specifications and alter them if needed."""
+    conn = sqlite3.connect('meshtastic_packets.db')
+    cursor = conn.cursor()
+    
+    try:
+        # Get current packets table schema
+        cursor.execute("PRAGMA table_info(packets)")
+        packets_columns = {row[1]: row[2] for row in cursor.fetchall()}
+        
+        # Define the expected packets table schema
+        expected_packets_schema = {
+            'id': 'INTEGER',
+            'packet_id': 'INTEGER', 
+            'from_node': 'INTEGER',
+            'to_node': 'INTEGER',
+            'from_id': 'TEXT',
+            'to_id': 'TEXT',
+            'rx_time': 'INTEGER',
+            'hop_limit': 'INTEGER',
+            'priority': 'TEXT',
+            'portnum': 'TEXT',
+            'payload': 'BLOB',
+            'telemetry': 'TEXT',
+            'position': 'TEXT',
+            'raw_data': 'TEXT',
+            'received_at': 'TIMESTAMP'
+        }
+        
+        # Check for missing columns in packets table
+        packets_altered = False
+        for col_name, col_type in expected_packets_schema.items():
+            if col_name not in packets_columns:
+                log.info(f"Adding missing column '{col_name}' to packets table")
+                cursor.execute(f"ALTER TABLE packets ADD COLUMN {col_name} {col_type}")
+                packets_altered = True
+        
+        # Get current nodes table schema
+        cursor.execute("PRAGMA table_info(nodes)")
+        nodes_columns = {row[1]: row[2] for row in cursor.fetchall()}
+        
+        # Define the expected nodes table schema
+        expected_nodes_schema = {
+            'node_id': 'TEXT',
+            'long_name': 'TEXT',
+            'short_name': 'TEXT', 
+            'node_int': 'INTEGER',
+            'hw_model': 'TEXT',
+            'firmware_version': 'TEXT',
+            'role': 'TEXT',
+            'last_seen': 'TIMESTAMP',
+            'battery_level': 'INTEGER',
+            'voltage': 'REAL',
+            'channel_utilization': 'REAL',
+            'air_util_tx': 'REAL',
+            'created_at': 'TIMESTAMP',
+            'updated_at': 'TIMESTAMP'
+        }
+        
+        # Check for missing columns in nodes table
+        nodes_altered = False
+        for col_name, col_type in expected_nodes_schema.items():
+            if col_name not in nodes_columns:
+                log.info(f"Adding missing column '{col_name}' to nodes table")
+                cursor.execute(f"ALTER TABLE nodes ADD COLUMN {col_name} {col_type}")
+                nodes_altered = True
+        
+        # Add default values for new timestamp columns if they were added
+        if 'created_at' not in nodes_columns and nodes_altered:
+            cursor.execute("UPDATE nodes SET created_at = CURRENT_TIMESTAMP WHERE created_at IS NULL")
+        if 'updated_at' not in nodes_columns and nodes_altered:
+            cursor.execute("UPDATE nodes SET updated_at = CURRENT_TIMESTAMP WHERE updated_at IS NULL")
+        if 'received_at' not in packets_columns and packets_altered:
+            cursor.execute("UPDATE packets SET received_at = CURRENT_TIMESTAMP WHERE received_at IS NULL")
+        
+        conn.commit()
+        
+        # Log completion
+        if packets_altered or nodes_altered:
+            altered_tables = []
+            if packets_altered:
+                altered_tables.append("packets")
+            if nodes_altered:
+                altered_tables.append("nodes")
+            log.info(f"Database schema alteration completed for tables: {', '.join(altered_tables)}")
+        else:
+            log.info("Database schema check completed - no alterations needed")
+            
+    except Exception as e:
+        log.error(f"Error checking/altering database schema: {e}")
+        conn.rollback()
+    finally:
+        conn.close()
 
 def store_packet(original_packet, parsed_packet):
     """Store packet data in SQLite database with individual fields"""
@@ -195,26 +293,29 @@ def query_recent_packets(limit=5):
         print(f"Error querying packets: {e}")
         return []
 
-def store_node_info(node_id, node_info):
+def store_node_info(packet: 'Packet'):
     """Store or update node information in the database"""
     try:
         conn = sqlite3.connect('meshtastic_packets.db')
         cursor = conn.cursor()
+
+        user = packet.decoded.user 
         
         # Extract node information
-        user = node_info.get('user', {})
+        node_id = user.get('id', packet.fromId)
         long_name = user.get('longName', '')
         short_name = user.get('shortName', '')
         hw_model = user.get('hwModel', '')
         firmware_version = user.get('firmwareVersion', '')
         role = user.get('role', '')
-        
+        node_int = packet.from_ if hasattr(packet, 'from_') else 0
+
         # Insert or update node info
         cursor.execute('''
             INSERT OR REPLACE INTO nodes 
-            (node_id, long_name, short_name, hw_model, firmware_version, role, last_seen, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-        ''', (node_id, long_name, short_name, hw_model, firmware_version, role))
+            (node_id, long_name, node_int, short_name, hw_model, firmware_version, role, last_seen, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        ''', (node_id, long_name, node_int, short_name, hw_model, firmware_version, role))
         
         conn.commit()
         conn.close()
@@ -223,13 +324,18 @@ def store_node_info(node_id, node_info):
         print(f"Error storing node info: {e}")
 
 @lru_cache(maxsize=1000)
-def get_node_name(node_id):
-    """Get the long name for a node ID, fallback to hex ID if not found"""
+def get_node_name(node_id: int | str):
+    """Get the long name for a node ID or integer, fallback to hex ID if not found"""
     try:
         conn = sqlite3.connect('meshtastic_packets.db')
         cursor = conn.cursor()
         
-        cursor.execute('SELECT long_name, short_name FROM nodes WHERE node_id = ?', (node_id,))
+        if isinstance(node_id, str):
+            cursor.execute('SELECT long_name, short_name FROM nodes WHERE node_id = ?', (node_id,))
+        elif isinstance(node_id, int):
+            cursor.execute('SELECT long_name, short_name FROM nodes WHERE node_int = ?', (node_id,))
+        else:
+            return str(node_id)  # Fallback to string representation if not a valid type
         result = cursor.fetchone()
         conn.close()
         
@@ -375,13 +481,25 @@ def load_packets_from_database():
         print(f"Error loading packets from database: {e}")
         return 0
 
-def query_packets(limit=100, portnum=None, from_id=None, to_id=None, substring=None, exclude=False):
+def query_packets(limit=100, portnum=None, from_id=None, to_id=None, substring=None, exclude=False, newer_than=None):
     """Get packets from the global packet list with optional filters"""
     with packet_list_lock:
         filtered_packets = packet_list.copy()
-        
-    if portnum:
-        filtered_packets = [p for p in filtered_packets if p.decoded.portnum == portnum]
+
+    # Lookup the Meshtastic protobuf portnum string if portnum is given as an int
+    portnum_str = None
+    if portnum is not None:
+        # If portnum is an integer, try to get the string name from protobuf
+        if isinstance(portnum, int):
+            try:
+                # Try to get the string name from the protobuf enum
+                portnum_str = meshtastic.portnums_pb2.PortNum.Name(portnum)
+            except Exception:
+                portnum_str = str(portnum)
+        else:
+            portnum_str = str(portnum)
+
+        filtered_packets = [p for p in filtered_packets if p.decoded.portnum == portnum_str]
     if from_id:
         filtered_packets = [p for p in filtered_packets if p.fromId == from_id]
     if to_id:
@@ -391,6 +509,9 @@ def query_packets(limit=100, portnum=None, from_id=None, to_id=None, substring=N
             filtered_packets = [p for p in filtered_packets if p.matches_substring(substring)]
         else:
             filtered_packets = [p for p in filtered_packets if not p.matches_substring(substring)]
+    if newer_than:
+        # Filter packets newer than the specified timestamp
+        filtered_packets = [p for p in filtered_packets if p.rxTime > newer_than]
     
     return filtered_packets[-limit:]  # Return the last 'limit' packets
 
@@ -501,7 +622,8 @@ class Packet:
             decoded = Decoded.from_dict(data.pop("decoded", {}))
         else:
             decoded = Decoded('', b'encrypted')
-        return cls(
+
+        r = cls(
             id=data.pop("id", 0),
             from_=data.get("from", 0),
             to=data.get("to", 0),
@@ -514,6 +636,13 @@ class Packet:
             raw=raw,
             packet_original=data  # Store original data for debugging
         )
+
+        if not r.fromId:
+            r.fromId = get_node_name(r.from_)
+        if not r.toId:
+            r.toId = get_node_name(r.to)
+
+        return r
 
 def onReceive(packet, interface):
     """Called when a packet is received from meshtastic."""
@@ -533,17 +662,18 @@ def onReceive(packet, interface):
 
         if parsed_packet.decoded.portnum == 'NODEINFO_APP':
             # store or update node information
-            user = parsed_packet.decoded.user or {}
-            store_node_info(
-                user.get('id', parsed_packet.fromId),
-                {'user': {
-                    'longName': user.get('longName', ''),
-                    'shortName': user.get('shortName', ''),
-                    'hwModel': user.get('hwModel', ''),
-                    'firmwareVersion': user.get('firmwareVersion', ''),
-                    'role': user.get('role', '')
-                }}
-            )
+            # user = parsed_packet.decoded.user or {}
+            store_node_info(parsed_packet)
+            # store_node_info(
+            #     user.get('id', parsed_packet.fromId),
+            #     {'user': {
+            #         'longName': user.get('longName', ''),
+            #         'shortName': user.get('shortName', ''),
+            #         'hwModel': user.get('hwModel', ''),
+            #         'firmwareVersion': user.get('firmwareVersion', ''),
+            #         'role': user.get('role', '')
+            #     }}
+            # )
         
         # Check for notes from packet processing
         if parsed_packet.decoded.notes:
@@ -606,12 +736,22 @@ def send_vox_message(destinationId: str, data: bytes):
             destinationId=destinationId,
             wantAck=True,
             wantResponse=False,
-            portNum=meshtastic.portnums_pb2.TEXT_MESSAGE_APP,
+            portNum=MESHVOX_PORTNUM,
             hopLimit=1,
             pkiEncrypted=True,
             onResponse=onAckNak
         )
-        log.info(f"Packet sent: {pkt}")
+        log.debug(f"Packet sent: {pkt}")
+        from google.protobuf.json_format import MessageToDict
+        packet = MessageToDict(pkt)
+        # pub.sendMessage("meshtastic.receive", packet, interface=None)
+        onReceive(packet, None)
+        # with packet_list_lock:
+        #     packet_list.append(pkt)
+        #     if len(packet_list) > 1000:
+        #             packet_list.pop(0)
+    
+    
         # while True:
         #     time.sleep(1)
 
@@ -671,7 +811,7 @@ def add_test_packets():
                 'shortName': node["short_name"],
                 'hwModel': 'HELTEC_V3',
                 'firmwareVersion': '2.3.2',
-                'role': 'CLIENT'
+                'role': 'CLIENT',
             }
         })
     
@@ -731,6 +871,7 @@ def add_test_packets():
 
 # Initialize database when script starts
 init_database()
+check_and_alter_tables()
 
 if __name__ == "__main__":
     # Start meshtastic interface in background thread
