@@ -719,8 +719,9 @@ class MeshtasticTUI(App):
         
         # Filter packets based on filter text
         exclude = self.filter_text.startswith('!')
+        filter_text = self.filter_text[1:] if exclude else self.filter_text
         portnum = MESHVOX_PORTNUM if active_tab.id == "vox_tab" else None
-        filtered_packets = query_packets(limit=100, substring=self.filter_text, exclude=exclude, portnum=portnum, newer_than=newer_than)
+        filtered_packets = query_packets(limit=100, substring=filter_text, exclude=exclude, portnum=portnum, newer_than=newer_than)
         filtered_packets = [p.to_dict() for p in filtered_packets]
         
         # Add filtered packets to table (show most recent first)

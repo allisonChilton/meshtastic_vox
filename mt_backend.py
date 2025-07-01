@@ -27,6 +27,7 @@ log = logging.getLogger(__name__)
 packet_list: List['Packet'] = []
 packet_list_lock = threading.Lock()
 MESHVOX_PORTNUM = meshtastic.portnums_pb2.PRIVATE_APP
+node_int_update = []
 
 # Subtopics dictionary with descriptions
 subtopics = {
@@ -87,6 +88,16 @@ def init_database():
     ''')
     
     conn.commit()
+
+    # Gather node_ids where node_int is NULL and node_id is NOT NULL
+    try:
+        cursor.execute("SELECT node_id FROM nodes WHERE node_int IS NULL AND node_id IS NOT NULL")
+        node_int_update.clear()
+        node_int_update.extend([row[0] for row in cursor.fetchall()])
+    except Exception as e:
+        log.error(f"Error gathering node_ids for node_int_update: {e}")
+
+
     conn.close()
     print("Database initialized successfully")
     
@@ -302,26 +313,59 @@ def store_node_info(packet: 'Packet'):
         user = packet.decoded.user 
         
         # Extract node information
-        node_id = user.get('id', packet.fromId)
-        long_name = user.get('longName', '')
-        short_name = user.get('shortName', '')
-        hw_model = user.get('hwModel', '')
-        firmware_version = user.get('firmwareVersion', '')
-        role = user.get('role', '')
-        node_int = packet.from_ if hasattr(packet, 'from_') else 0
+        if user:
+            node_id = user.get('id', packet.fromId)
+            long_name = user.get('longName', '')
+            short_name = user.get('shortName', '')
+            hw_model = user.get('hwModel', '')
+            firmware_version = user.get('firmwareVersion', '')
+            role = user.get('role', '')
+            node_int = packet.from_ if hasattr(packet, 'from_') else 0
 
-        # Insert or update node info
-        cursor.execute('''
-            INSERT OR REPLACE INTO nodes 
-            (node_id, long_name, node_int, short_name, hw_model, firmware_version, role, last_seen, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-        ''', (node_id, long_name, node_int, short_name, hw_model, firmware_version, role))
+            # Insert or update node info
+            cursor.execute('''
+                INSERT OR REPLACE INTO nodes 
+                (node_id, long_name, node_int, short_name, hw_model, firmware_version, role, last_seen, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ''', (node_id, long_name, node_int, short_name, hw_model, firmware_version, role))
+        else:
+            node_id = packet.fromId
+            node_int = packet.from_ if hasattr(packet, 'from_') else 0
+            update_node_by_id(node_id, node_int, cursor)
         
         conn.commit()
         conn.close()
         
     except Exception as e:
         print(f"Error storing node info: {e}")
+
+def update_node_by_id(node_id: str, node_int: int, cursor=None):
+    close_on_finish = False
+    if not cursor:
+        conn = sqlite3.connect('meshtastic_packets.db')
+        cursor = conn.cursor()
+        close_on_finish = True
+
+    # Query the database for existing user values, else set them to NULL
+    cursor.execute('''
+        SELECT long_name, short_name, hw_model, firmware_version, role
+        FROM nodes WHERE node_id = ?
+    ''', (node_id,))
+    row = cursor.fetchone()
+    if row:
+        long_name, short_name, hw_model, firmware_version, role = row
+    else:
+        long_name = short_name = hw_model = firmware_version = role = None
+
+    cursor.execute('''
+        INSERT OR REPLACE INTO nodes 
+        (node_id, long_name, node_int, short_name, hw_model, firmware_version, role, last_seen, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    ''', (node_id, long_name, node_int, short_name, hw_model, firmware_version, role))
+
+    if close_on_finish:
+        conn.commit()
+        conn.close()
 
 @lru_cache(maxsize=1000)
 def get_node_name(node_id: int | str):
@@ -656,24 +700,20 @@ def onReceive(packet, interface):
         if parsed_packet.decoded.telemetry:
             update_node_telemetry(parsed_packet.fromId, parsed_packet.decoded.telemetry)
         
-        # Process position data if available
-        # if parsed_packet.decoded.position:
-        #     processing_notes.append("Position data available")
-
         if parsed_packet.decoded.portnum == 'NODEINFO_APP':
             # store or update node information
-            # user = parsed_packet.decoded.user or {}
             store_node_info(parsed_packet)
-            # store_node_info(
-            #     user.get('id', parsed_packet.fromId),
-            #     {'user': {
-            #         'longName': user.get('longName', ''),
-            #         'shortName': user.get('shortName', ''),
-            #         'hwModel': user.get('hwModel', ''),
-            #         'firmwareVersion': user.get('firmwareVersion', ''),
-            #         'role': user.get('role', '')
-            #     }}
-            # )
+        else: 
+            if parsed_packet.fromId in node_int_update: 
+                # If node_int_update contains this node_id, update its node_int
+                store_node_info(parsed_packet)
+                # Remove from update list after processing
+                node_int_update.remove(parsed_packet.fromId)
+            if parsed_packet.toId in node_int_update:
+                node_id = parsed_packet.toId
+                node_int = parsed_packet.to
+                update_node_by_id(node_id, node_int)
+                node_int_update.remove(node_id)
         
         # Check for notes from packet processing
         if parsed_packet.decoded.notes:
@@ -745,6 +785,9 @@ def send_vox_message(destinationId: str, data: bytes):
         from google.protobuf.json_format import MessageToDict
         packet = MessageToDict(pkt)
         # pub.sendMessage("meshtastic.receive", packet, interface=None)
+        packet['from'] = interface.myInfo.my_node_num
+        packet['fromId'] = get_node_name(interface.myInfo.my_node_num)
+        packet['toId'] = get_node_name(packet['to'])
         onReceive(packet, None)
         # with packet_list_lock:
         #     packet_list.append(pkt)
